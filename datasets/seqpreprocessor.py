@@ -12,7 +12,9 @@ class SeqTrainPreprocessor(object):
         self.transform = transform
         self.seq_len = seq_len
         self.root = [dataset.images_dir]
-        self.root.append(dataset.other_dir)
+        self.has_flow = osp.isdir(dataset.other_dir)
+        if self.has_flow:
+            self.root.append(dataset.other_dir)
 
     def __len__(self):
         return len(self.seqset)
@@ -32,23 +34,25 @@ class SeqTrainPreprocessor(object):
             fname = self.identities[pid][camid][ind]
             fpath_img = osp.join(self.root[0], fname)
             imgrgb = Image.open(fpath_img).convert('RGB')
-            fpath_flow = osp.join(self.root[1], fname)
-            flowrgb = Image.open(fpath_flow).convert('RGB')
             imgseq.append(imgrgb)
-            flowseq.append(flowrgb)
+            if self.has_flow:
+                fpath_flow = osp.join(self.root[1], fname)
+                flowrgb = Image.open(fpath_flow).convert('RGB')
+                flowseq.append(flowrgb)
 
         while len(imgseq) < self.seq_len:
             imgseq.append(imgrgb)
-            flowseq.append(flowrgb)
+            if self.has_flow:
+                flowseq.append(flowrgb)
 
-        seq = [imgseq, flowseq]
-
-        if self.transform is not None:
-            seq = self.transform(seq)
-
-        img_tensor = torch.stack(seq[0], 0)
-
-        flow_tensor = torch.stack(seq[1], 0)
+        if self.has_flow:
+            seq = self.transform([imgseq, flowseq]) if self.transform else [imgseq, flowseq]
+            img_tensor = torch.stack(seq[0], 0)
+            flow_tensor = torch.stack(seq[1], 0)
+        else:
+            seq = self.transform([imgseq]) if self.transform else [imgseq]
+            img_tensor = torch.stack(seq[0], 0)
+            flow_tensor = None
 
         return img_tensor, flow_tensor, label, camid
 
@@ -62,7 +66,9 @@ class SeqTestPreprocessor(object):
         self.transform = transform
         self.seq_len = seq_len
         self.root = [dataset.images_dir]
-        self.root.append(dataset.other_dir)
+        self.has_flow = osp.isdir(dataset.other_dir)
+        if self.has_flow:
+            self.root.append(dataset.other_dir)
 
     def __len__(self):
         return len(self.seqset)
@@ -82,25 +88,24 @@ class SeqTestPreprocessor(object):
             fname = self.identities[pid][camid][ind]
             fpath_img = osp.join(self.root[0], fname)
             imgrgb = Image.open(fpath_img).convert('RGB')
-            fpath_flow = osp.join(self.root[1], fname)
-            flowrgb = Image.open(fpath_flow).convert('RGB')
             imgseq.append(imgrgb)
-            flowseq.append(flowrgb)
+            if self.has_flow:
+                fpath_flow = osp.join(self.root[1], fname)
+                flowrgb = Image.open(fpath_flow).convert('RGB')
+                flowseq.append(flowrgb)
 
         while len(imgseq) < self.seq_len:
             imgseq.append(imgrgb)
-            flowseq.append(flowrgb)
+            if self.has_flow:
+                flowseq.append(flowrgb)
 
-        seq = [imgseq, flowseq]
-
-        if self.transform is not None:
-            seq = self.transform(seq)
-
-        img_tensor = torch.stack(seq[0], 0)
-
-        if len(self.root) == 2:
+        if self.has_flow:
+            seq = self.transform([imgseq, flowseq]) if self.transform else [imgseq, flowseq]
+            img_tensor = torch.stack(seq[0], 0)
             flow_tensor = torch.stack(seq[1], 0)
         else:
+            seq = self.transform([imgseq]) if self.transform else [imgseq]
+            img_tensor = torch.stack(seq[0], 0)
             flow_tensor = None
 
         return img_tensor, flow_tensor, pid, camid

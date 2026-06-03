@@ -4,7 +4,6 @@ MODEL:
   IF_LABELSMOOTH: 'on'
   IF_WITH_CENTER: 'no'
   NAME: 'ViT-B-16'
-  # NAME: 'RN50'
   STRIDE_SIZE: [16, 16]
   ID_LOSS_WEIGHT : 0.25
   TRIPLET_LOSS_WEIGHT : 1.0
@@ -15,8 +14,8 @@ MODEL:
 INPUT:
   SIZE_TRAIN: [256, 128]
   SIZE_TEST: [256, 128]
-  PROB: 0.5 # random horizontal flip
-  RE_PROB: 0.5 # random erasing
+  PROB: 0.5
+  RE_PROB: 0.5
   PADDING: 10
   PIXEL_MEAN: [0.5, 0.5, 0.5]
   PIXEL_STD: [0.5, 0.5, 0.5]
@@ -41,7 +40,7 @@ SOLVER:
     CHECKPOINT_PERIOD: 120
     LOG_PERIOD: 50
     WARMUP_EPOCHS: 5
-  
+
   STAGE2:
     IMS_PER_BATCH: 16
     OPTIMIZER_NAME: "Adam"
@@ -58,10 +57,10 @@ SOLVER:
     LOG_PERIOD: 50
     EVAL_PERIOD: 2
     BIAS_LR_FACTOR: 2
-    
+
     STEPS: [30, 50, 70]
     GAMMA: 0.1
-  
+
 TEST:
   EVAL: False
   IMS_PER_BATCH: 1
@@ -71,13 +70,7 @@ TEST:
   FEAT_NORM: 'yes'
 
 DATASETS:
-  NAMES: ('mars')
-  ROOT_DIR: ('/data1/lgf/TF-CLIP/data/Mars')
+  NAMES: ('ilidsvidsequence')
+  ROOT_DIR: ('/data1/lgf/TF-CLIP/data/iLIDS-VID')
 
-  # NAMES: ('ilidsvidsequence')
-  # ROOT_DIR: ('../data/ilidsvidsequence/')
-  
-  # NAMES: ('lsvid')
-  # ROOT_DIR: ('../data/LSVID')
-
-OUTPUT_DIR: 'logs/mars_vit_clip_reid_newprompt+dense_meanp'
+OUTPUT_DIR: 'logs/ilids_vit_clip_reid'

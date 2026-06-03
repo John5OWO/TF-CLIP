@@ -1,0 +1,18 @@
+# dataset
+data/
+
+# checkpoints
+*.pth
+*.pth.tar
+*.pt
+
+# logs
+logs/
+*.log
+
+# python
+__pycache__/
+*.pyc
+
+# vscode
+.vscode/

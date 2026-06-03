@@ -21,7 +21,8 @@ class RandomIdentitySampler(Sampler):
         self.num_instances = num_instances  # 4
         self.num_pids_per_batch = self.batch_size // self.num_instances  # 4
         self.index_dic = defaultdict(list)
-        for index, (_, pid, _, _) in enumerate(data_source):
+        for index, item in enumerate(data_source):
+            pid = item[1] if len(item) == 4 else item[2]  # MARS: (paths,pid,cam,track), seq: (start,end,pid,idx,cam)
             self.index_dic[pid].append(index)
         self.pids = list(self.index_dic.keys())
         self.num_identities = len(self.pids)
@@ -82,7 +83,8 @@ class RandomIdentitySamplerForSeq(Sampler):
         self.num_instances = num_instances  # K=4
         self.num_pids_per_batch = self.batch_size // self.num_instances
         self.index_dic = defaultdict(list)
-        for index, (_, pid, _, _) in enumerate(data_source):
+        for index, item in enumerate(data_source):
+            pid = item[1] if len(item) == 4 else item[2]  # MARS: (paths,pid,cam,track), seq: (start,end,pid,idx,cam)
             self.index_dic[pid].append(index)
         self.pids = list(self.index_dic.keys())
         self.num_identities = len(self.pids)  # 625

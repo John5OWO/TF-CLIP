@@ -46,6 +46,15 @@ class Mars(object):
     split_gallery_json_path = osp.join(root, 'split_gallery.json')
     
     def __init__(self, root= '../data/Mars/', min_seq_len=0):
+        self.root = root
+        self.train_name_path = osp.join(self.root, 'info/train_name.txt')
+        self.test_name_path = osp.join(self.root, 'info/test_name.txt')
+        self.track_train_info_path = osp.join(self.root, 'info/tracks_train_info.mat')
+        self.track_test_info_path = osp.join(self.root, 'info/tracks_test_info.mat')
+        self.query_IDX_path = osp.join(self.root, 'info/query_IDX.mat')
+        self.split_train_json_path = osp.join(self.root, 'split_train.json')
+        self.split_query_json_path = osp.join(self.root, 'split_query.json')
+        self.split_gallery_json_path = osp.join(self.root, 'split_gallery.json')
         self._check_before_run()
 
         train_names = self._get_names(self.train_name_path)  # <class 'list'>: <Len: 509914> '0001C1T0001F001.jpg'

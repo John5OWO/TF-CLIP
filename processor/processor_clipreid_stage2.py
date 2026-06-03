@@ -29,7 +29,7 @@ def do_train_stage2(cfg,
     device = "cuda"
     epochs = cfg.SOLVER.STAGE2.MAX_EPOCHS
 
-    logger = logging.getLogger("TFCLIP.train")
+    logger = logging.getLogger("transreid")
     logger.info('start training')
     _LOCAL_PROCESS_GROUP = None
     if device:
