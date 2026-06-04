@@ -11,6 +11,8 @@ MODEL:
   I2T_LOSS_WEIGHT : 1.0
   SIE_CAMERA: True
   SIE_COE : 1.0
+  QATA:
+    ENABLED: False
 
 INPUT:
   SIZE_TRAIN: [256, 128]

@@ -49,6 +49,18 @@ _C.MODEL.SIE_COE = 3.0
 _C.MODEL.SIE_CAMERA = False
 _C.MODEL.SIE_VIEW = False
 
+# Quality-Aware Temporal Aggregation
+_C.MODEL.QATA = CN()
+_C.MODEL.QATA.ENABLED = False
+_C.MODEL.QATA.MODE = "plain"
+_C.MODEL.QATA.ALPHA = 0.1
+_C.MODEL.QATA.REDUCTION = 4
+_C.MODEL.QATA.DROPOUT = 0.0
+_C.MODEL.QATA.TEMP = 1.0
+_C.MODEL.QATA.RETURN_WEIGHTS = False
+_C.MODEL.QATA.LOG_STATS = False
+_C.MODEL.QATA.STATS_FILE = "qata_weight_stats.txt"
+
 # -----------------------------------------------------------------------------
 # INPUT
 # -----------------------------------------------------------------------------

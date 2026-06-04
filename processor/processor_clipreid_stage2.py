@@ -63,6 +63,98 @@ def do_train_stage2(cfg,
         centers = torch.stack(centers, dim=0)
         return centers
 
+    def _unwrap_model(model):
+        return model.module if hasattr(model, "module") else model
+
+    def _new_qata_stats():
+        return {"img": [], "proj": []}
+
+    @torch.no_grad()
+    def _compute_qata_stats(weights):
+        weights = weights.detach().float()
+        eps = 1e-12
+        safe_weights = weights.clamp_min(eps)
+        entropy = -(safe_weights * safe_weights.log()).sum(dim=1)
+        sorted_weights = torch.sort(weights, dim=1, descending=True).values
+        top1 = sorted_weights[:, 0]
+        if sorted_weights.size(1) >= 2:
+            top2 = sorted_weights[:, :2].sum(dim=1)
+        else:
+            top2 = top1
+
+        return {
+            "mean": weights.mean().item(),
+            "std": weights.std(unbiased=False).item(),
+            "max": weights.max().item(),
+            "min": weights.min().item(),
+            "entropy": entropy.mean().item(),
+            "effective_frames": torch.exp(entropy).mean().item(),
+            "top1": top1.mean().item(),
+            "top2": top2.mean().item(),
+        }
+
+    def _update_qata_stats(epoch_stats):
+        if not (cfg.MODEL.QATA.ENABLED and cfg.MODEL.QATA.LOG_STATS):
+            return
+        latest_weights = getattr(_unwrap_model(model), "latest_qata_weights", None)
+        if not latest_weights:
+            return
+        for name in ("img", "proj"):
+            weights = latest_weights.get(name)
+            if weights is not None:
+                epoch_stats[name].append(_compute_qata_stats(weights))
+
+    def _average_qata_stats(stats_list):
+        if not stats_list:
+            return None
+        keys = stats_list[0].keys()
+        return {key: sum(stats[key] for stats in stats_list) / len(stats_list) for key in keys}
+
+    def _format_qata_stats(epoch, name, stats):
+        return (
+            "QATA Stats - Epoch {} {}: mean {:.4f}, std {:.4f}, max {:.4f}, min {:.4f}, "
+            "entropy {:.4f}, effective_frames {:.4f}, top1 {:.4f}, top2 {:.4f}"
+        ).format(
+            epoch,
+            name,
+            stats["mean"],
+            stats["std"],
+            stats["max"],
+            stats["min"],
+            stats["entropy"],
+            stats["effective_frames"],
+            stats["top1"],
+            stats["top2"],
+        )
+
+    def _write_qata_stats(epoch, epoch_stats):
+        if not (cfg.MODEL.QATA.ENABLED and cfg.MODEL.QATA.LOG_STATS):
+            return
+        stats_path = os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.QATA.STATS_FILE)
+        file_exists = os.path.exists(stats_path)
+        with open(stats_path, "a") as stats_file:
+            if not file_exists:
+                stats_file.write("epoch,branch,mean,std,max,min,entropy,effective_frames,top1,top2\n")
+            for name in ("img", "proj"):
+                stats = _average_qata_stats(epoch_stats[name])
+                if stats is None:
+                    continue
+                logger.info(_format_qata_stats(epoch, name, stats))
+                stats_file.write(
+                    "{},{},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}\n".format(
+                        epoch,
+                        name,
+                        stats["mean"],
+                        stats["std"],
+                        stats["max"],
+                        stats["min"],
+                        stats["entropy"],
+                        stats["effective_frames"],
+                        stats["top1"],
+                        stats["top2"],
+                    )
+                )
+
     # train
     import time
     from datetime import timedelta
@@ -107,6 +199,7 @@ def do_train_stage2(cfg,
         acc_meter_id1.reset()
         acc_meter_id2.reset()
         evaluator.reset()
+        qata_epoch_stats = _new_qata_stats()
 
         model.train()
         for n_iter, (img, vid, target_cam, target_view) in enumerate(train_loader_stage2):
@@ -125,6 +218,7 @@ def do_train_stage2(cfg,
             with amp.autocast(enabled=True):
                 B, T, C, H, W = img.shape  # B=64, T=4.C=3 H=256,W=128
                 score, feat, logits1 = model(x = img, cam_label=target_cam, view_label=target_view, text_features2=cluster_features)
+                _update_qata_stats(qata_epoch_stats)
                 score1 = score[0:3]
                 score2 = score[3]
 
@@ -180,6 +274,7 @@ def do_train_stage2(cfg,
         else:
             logger.info("Epoch {} done. Time per batch: {:.3f}[s] Speed: {:.1f}[samples/s]"
                     .format(epoch, time_per_batch, train_loader_stage2.batch_size / time_per_batch))
+        _write_qata_stats(epoch, qata_epoch_stats)
 
 
         if epoch % eval_period == 0:

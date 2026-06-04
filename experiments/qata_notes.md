@@ -1,0 +1,412 @@
+# QATA Notes
+
+## 2026-06-03 Minimal QATA Implementation
+
+### Modified Files
+
+- `model/quality_aggregation.py`
+- `model/make_model_clipreid.py`
+- `config/defaults.py`
+- `configs/vit_clipreid.yml`
+- `configs/vit_clipreid_ilids.yml`
+- `configs/vit_clipreid_qata.yml`
+- `configs/vit_clipreid_ilids_qata.yml`
+
+### Configuration Difference
+
+- Baseline configs keep `MODEL.QATA.ENABLED: False`.
+- QATA configs set `MODEL.QATA.ENABLED: True`.
+- MARS QATA output directory: `logs/mars_vit_clip_reid_qata`.
+- iLIDS-VID QATA output directory: `logs/ilids_vit_clip_reid_qata`.
+
+### Scope
+
+- Replaced only the model-internal video-level pooling for `img_feature` and `img_feature_proj`.
+- Did not modify TMD aggregation, CLIP-Memory generation, dense inference, or stage2 processor code.
+
+### Sanity Checks
+
+- `python3 -m py_compile model/quality_aggregation.py model/make_model_clipreid.py config/defaults.py`: passed.
+- Config merge check with `/data1/lgf/miniconda3/envs/tfclip/bin/python`: passed.
+- `QualityWeightedPooling` smoke test: output shape and weight normalization passed.
+
+### Experiment Commands
+
+MARS:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_qata.yml
+```
+
+iLIDS-VID:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_ilids_qata.yml
+```
+
+### Results
+
+- Training not started in this implementation pass.
+- mAP / Rank-1 / Rank-5: pending.
+
+## 2026-06-03 Sanity Check
+
+### Commands
+
+```bash
+git status --short
+git diff --name-only
+python -m py_compile model/quality_aggregation.py
+python -m py_compile model/make_model_clipreid.py
+python -m py_compile config/defaults.py
+/data1/lgf/miniconda3/envs/tfclip/bin/python -m py_compile model/quality_aggregation.py
+/data1/lgf/miniconda3/envs/tfclip/bin/python -m py_compile model/make_model_clipreid.py
+/data1/lgf/miniconda3/envs/tfclip/bin/python -m py_compile config/defaults.py
+/data1/lgf/miniconda3/envs/tfclip/bin/python /tmp/check_qata_build.py --config_file configs/vit_clipreid_qata.yml
+/data1/lgf/miniconda3/envs/tfclip/bin/python /tmp/check_qata_forward_cpu.py
+```
+
+### Results
+
+- `python -m py_compile ...`: failed because `python` is not available in the shell.
+- tfclip env `py_compile`: passed for `model/quality_aggregation.py`, `model/make_model_clipreid.py`, and `config/defaults.py`.
+- MARS QATA config merge: passed.
+- Model build with the real project path reached CLIP loading, but failed at `clip_model.to("cuda")` because no CUDA GPUs are available in this session.
+- CPU-only temporary shape check passed:
+  - baseline config output feature shape: `(1, 2048)`
+  - QATA config output feature shape: `(1, 2048)`
+  - QATA config has `qpool_768` and `qpool_512`.
+- MARS dataset metadata loaded successfully.
+- Fetching one real dataloader batch did not complete in a reasonable time in this environment, so the temporary process was terminated. No training was started and no checkpoint was saved.
+
+### Notes
+
+- Strict file-scope check found two additional modified baseline config files: `configs/vit_clipreid.yml` and `configs/vit_clipreid_ilids.yml`, where QATA is explicitly disabled. These changes are harmless but outside the narrower sanity-check file list.
+- `AGENTS.md` is untracked in the worktree and was not modified during this check.
+
+## 2026-06-03 Formal Minimal QATA Experiments
+
+### Commands
+
+GPU check:
+
+```bash
+nvidia-smi
+```
+
+MARS QATA:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_qata.yml OUTPUT_DIR logs/qata_mars_20260603_214227
+```
+
+iLIDS-VID QATA:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_ilids_qata.yml OUTPUT_DIR logs/qata_ilids_20260603_214227
+```
+
+### Results
+
+| Dataset | Method | Config | Output Dir | mAP | Rank-1 | Rank-5 | Best Epoch | Train Time | Notes |
+|---|---|---|---|---|---|---|---|---|---|
+| MARS | Baseline | `configs/vit_clipreid.yml` | `logs/mars_vit_clip_reid_newprompt+dense_meanp` | 88.9 | 93.0 | 98.1 | 56 | 3:28:27.841264 | Existing log; best perform 181.9%. |
+| MARS | Minimal QATA | `configs/vit_clipreid_qata.yml` | `logs/qata_mars_20260603_214227` | 88.2 | 92.3 | 97.0 | 32 | 3:24:10.848671 | GPU 2; no OOM; best perform 180.5%. |
+| iLIDS-VID | Baseline | `configs/vit_clipreid_ilids.yml` | `logs/ilids_vit_clip_reid` | 76.9 | 81.2 | 86.7 | 28 | 2:13:16.290315 | Existing log; best perform 158.2%. |
+| iLIDS-VID | Minimal QATA | `configs/vit_clipreid_ilids_qata.yml` | `logs/qata_ilids_20260603_214227` | 75.6 | 79.8 | 86.8 | 26 | 2:14:50.775733 | GPU 3; no OOM; best perform 155.4%. |
+
+### Initial Analysis
+
+- Minimal QATA did not improve either dataset under the current settings.
+- MARS dropped by 0.7 mAP, 0.7 Rank-1, and 1.1 Rank-5 at the logged best epoch.
+- iLIDS-VID dropped by 1.3 mAP and 1.4 Rank-1, while Rank-5 was nearly unchanged.
+- The trend is consistent across MARS and iLIDS-VID: train accuracy becomes high, but validation plateaus below baseline.
+- This result is not strong enough to justify directly extending QATA into TMD, CLIP-Memory, or dense inference yet.
+- Recommended next step: diagnose QATA frame weights and try a conservative residual/regularized variant before expanding scope.
+
+## 2026-06-04 Minimal QATA Diagnosis
+
+### Full-Run Log Recheck
+
+Compared logs:
+
+- MARS baseline: `logs/mars_vit_clip_reid_newprompt+dense_meanp/train_log.txt`
+- MARS Minimal QATA: `logs/qata_mars_20260603_214227/train_log.txt`
+- iLIDS baseline: `logs/ilids_vit_clip_reid/train_log.txt`
+- iLIDS Minimal QATA: `logs/qata_ilids_20260603_214227/train_log.txt`
+
+Key findings:
+
+- Best epoch moves earlier with QATA.
+  - MARS baseline best epoch: 56; Minimal QATA best epoch: 32.
+  - iLIDS baseline best epoch: 28; Minimal QATA best epoch: 26.
+- Training loss and training accuracy are very close to baseline at matched epochs.
+  - MARS epoch 5 near-end loss: baseline 7.211 vs QATA 7.206.
+  - MARS epoch 30 near-end loss: baseline 3.990 vs QATA 3.963.
+  - iLIDS epoch 5 near-end loss: baseline 5.456 vs QATA 5.455.
+  - iLIDS epoch 30 near-end loss: baseline 2.881 vs QATA 2.804.
+- Validation is not an early-stop or under-training issue.
+  - MARS QATA reaches 88.2 mAP at epoch 32 and then stays around 87.9-88.2 through epoch 80, but Rank-1 remains below baseline.
+  - iLIDS QATA reaches the best combined score at epoch 26; later mAP hovers around 75.1-76.1 while Rank-1 drops to about 78.3-79.5.
+- Overfitting signal is mild but visible: train accuracy saturates, while validation plateaus below baseline. This is especially clear on iLIDS.
+- Curve behavior is not wildly unstable; the issue is a lower plateau rather than catastrophic divergence.
+
+Interpretation:
+
+- Minimal QATA is optimization-stable, but it does not provide a better temporal aggregation signal than mean pooling.
+- The degradation is likely caused by adding a weak/unregularized quality estimator that perturbs well-tuned CLIP video features without a direct quality supervision signal.
+
+### Diagnostic Code Added
+
+Additional switchable diagnostics:
+
+- `MODEL.QATA.LOG_STATS = False`
+- `MODEL.QATA.STATS_FILE = "qata_weight_stats.txt"`
+
+When both `MODEL.QATA.ENABLED=True` and `MODEL.QATA.LOG_STATS=True`, stage2 training records epoch-averaged QATA weight statistics for:
+
+- `img`: weights from `qpool_768`
+- `proj`: weights from `qpool_512`
+
+Metrics written per epoch:
+
+- mean
+- std
+- max
+- min
+- entropy
+- effective frames = `exp(entropy)`
+- top1 weight
+- top2 weight
+
+The diagnostics are off by default and do not change baseline training or normal QATA training.
+
+### Short Diagnostic Runs
+
+Commands:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_qata.yml OUTPUT_DIR logs/qata_diag_mars_20260604_154211 MODEL.QATA.LOG_STATS True MODEL.QATA.STATS_FILE qata_weight_stats.txt SOLVER.STAGE2.MAX_EPOCHS 5 SOLVER.STAGE2.EVAL_PERIOD 5
+CUDA_VISIBLE_DEVICES=3 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_ilids_qata.yml OUTPUT_DIR logs/qata_diag_ilids_20260604_154211 MODEL.QATA.LOG_STATS True MODEL.QATA.STATS_FILE qata_weight_stats.txt SOLVER.STAGE2.MAX_EPOCHS 5 SOLVER.STAGE2.EVAL_PERIOD 5
+```
+
+Diagnostic outputs:
+
+| Dataset | Output Dir | Epochs | Diagnostic File | mAP@5 | Rank-1@5 | Train Time |
+|---|---|---:|---|---:|---:|---|
+| MARS | `logs/qata_diag_mars_20260604_154211` | 5 | `qata_weight_stats.txt` | 77.6 | 85.0 | 0:14:36.171842 |
+| iLIDS-VID | `logs/qata_diag_ilids_20260604_154211` | 5 | `qata_weight_stats.txt` | 53.9 | 58.0 | 0:06:58.849779 |
+
+Weight statistics summary at epoch 5:
+
+| Dataset | Branch | Mean | Std | Max | Min | Entropy | Effective Frames | Top1 | Top2 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| MARS | img | 0.1250 | 0.0110 | 0.1571 | 0.0956 | 2.0755 | 7.9687 | 0.1418 | 0.2766 |
+| MARS | proj | 0.1250 | 0.0147 | 0.1648 | 0.0828 | 2.0724 | 7.9438 | 0.1464 | 0.2845 |
+| iLIDS-VID | img | 0.1250 | 0.0108 | 0.1571 | 0.0983 | 2.0757 | 7.9702 | 0.1419 | 0.2766 |
+| iLIDS-VID | proj | 0.1250 | 0.0118 | 0.1576 | 0.0937 | 2.0749 | 7.9640 | 0.1427 | 0.2783 |
+
+For `SEQ_LEN=8`, uniform pooling has:
+
+- weight mean: 0.125
+- entropy: `ln(8)=2.0794`
+- effective frames: 8
+- top1: 0.125
+- top2: 0.25
+
+Diagnosis:
+
+- No weight collapse was observed.
+- The weights are very close to uniform on both MARS and iLIDS.
+- `proj` becomes slightly more non-uniform than `img`, especially on MARS, but the difference is weak.
+- Minimal QATA is therefore not failing because it selects one frame too aggressively. It is closer to a noisy near-mean pooling module that adds extra parameters and small feature perturbations without learning reliable quality separation.
+
+### Second-Round Variant Design
+
+Recommended candidate A: Residual QATA.
+
+Formula:
+
+```text
+pooled = mean_pool + alpha * (qpool - mean_pool)
+```
+
+Design:
+
+- Add `MODEL.QATA.MODE = "plain" | "residual" | "warmup"`.
+- Add `MODEL.QATA.ALPHA = 0.1`.
+- First version should use fixed alpha, not learnable alpha.
+- Apply only to the same two locations: `img_feature` and `img_feature_proj`.
+
+Why:
+
+- It preserves the baseline mean representation as the main path.
+- It allows QATA to contribute only a small correction.
+- It is easy to ablate with `alpha=0.0/0.1/0.2`.
+- It directly addresses the current finding: QATA is not harmful through collapse, but through weak noisy perturbation.
+
+Recommended candidate B: Warmup QATA.
+
+Formula:
+
+```text
+pooled = (1 - beta) * mean_pool + beta * qpool
+```
+
+Design:
+
+- Add `MODEL.QATA.WARMUP_EPOCHS`, e.g. 10 or 20.
+- Add `MODEL.QATA.TARGET_BETA`, e.g. 0.2.
+- `beta` linearly increases from 0 to target beta.
+
+Risk:
+
+- Requires passing current epoch or a setter into the model, so it touches processor/model interaction more than Residual QATA.
+- Better as a second step after fixed residual alpha.
+
+Recommended candidate C: High-temperature QATA.
+
+Design:
+
+- Test `MODEL.QATA.TEMP = 2.0, 3.0, 5.0`.
+
+Risk:
+
+- Current weights are already near-uniform at temp 1.0, so raising temperature is unlikely to fix the main issue.
+- Useful only as a control experiment to verify that even softer weights behave like mean pooling.
+
+Candidate D: Entropy regularization.
+
+Design:
+
+- Keep as a config design only for now.
+- If future diagnostics show collapse, add entropy regularization to discourage overly sharp weights.
+
+Risk:
+
+- Current diagnosis does not show collapse. Adding entropy loss now would push weights even closer to uniform and likely not help.
+
+### Recommended Next Step
+
+Run Residual QATA first:
+
+| Priority | Dataset | Variant | Alpha | Temp | Notes |
+|---:|---|---|---:|---:|---|
+| 1 | MARS | Residual QATA | 0.1 | 1.0 | Main low-risk check. |
+| 2 | iLIDS-VID | Residual QATA | 0.1 | 1.0 | Confirm cross-dataset trend. |
+| 3 | MARS | Residual QATA | 0.2 | 1.0 | Only if alpha 0.1 is not worse. |
+| 4 | iLIDS-VID | Residual QATA | 0.2 | 1.0 | Only if alpha 0.1 is not worse. |
+| 5 | MARS | Plain QATA | 0.0 | 3.0 | Low-priority control; likely close to mean. |
+
+Stop for now:
+
+- Extending QATA to TMD.
+- Extending QATA to CLIP-Memory generation.
+- Extending QATA to dense inference.
+- Entropy regularization full training.
+- Large grids over reduction/dropout/temperature before Residual QATA is tested.
+
+## 2026-06-04 Residual QATA Implementation
+
+### Goal
+
+Implement a conservative second-round QATA variant:
+
+```text
+pooled = mean_pool + alpha * (qpool - mean_pool)
+```
+
+The first version uses fixed `alpha=0.1`. QATA remains switchable and still only replaces the two minimal pooling locations:
+
+- `img_feature.mean(1)`
+- `img_feature_proj.mean(1)`
+
+No changes were made to TMD, CLIP-Memory generation, or dense inference.
+
+### Modified Files
+
+- `config/defaults.py`
+- `model/quality_aggregation.py`
+- `model/make_model_clipreid.py`
+- `configs/vit_clipreid_qata_residual_a01.yml`
+- `configs/vit_clipreid_ilids_qata_residual_a01.yml`
+- `experiments/qata_notes.md`
+
+### Config Additions
+
+Added under `MODEL.QATA`:
+
+- `MODE = "plain"`
+- `ALPHA = 0.1`
+
+Compatibility:
+
+- `MODEL.QATA.ENABLED=False`: baseline mean pooling.
+- `MODEL.QATA.ENABLED=True`, `MODE="plain"`: first-round Minimal QATA.
+- `MODEL.QATA.ENABLED=True`, `MODE="residual"`: Residual QATA.
+
+### Implementation Notes
+
+`QualityWeightedPooling` now accepts:
+
+- `mode="plain" | "residual"`
+- `alpha`
+
+Forward behavior:
+
+- `plain`: `pooled = qpool`
+- `residual`: `pooled = mean_pool + alpha * (qpool - mean_pool)`
+
+Weights are still returned when requested, so `MODEL.QATA.LOG_STATS=True` continues to work.
+
+### Checks
+
+Commands:
+
+```bash
+/data1/lgf/miniconda3/envs/tfclip/bin/python -m py_compile model/quality_aggregation.py model/make_model_clipreid.py processor/processor_clipreid_stage2.py config/defaults.py
+/data1/lgf/miniconda3/envs/tfclip/bin/python -c "from config import cfg; files=['configs/vit_clipreid_qata_residual_a01.yml','configs/vit_clipreid_ilids_qata_residual_a01.yml']; ..."
+/data1/lgf/miniconda3/envs/tfclip/bin/python -c "import torch; from model.quality_aggregation import QualityWeightedPooling; ..."
+CUDA_VISIBLE_DEVICES=2 /data1/lgf/miniconda3/envs/tfclip/bin/python /tmp/check_residual_qata_sanity.py
+```
+
+Results:
+
+- `py_compile`: passed.
+- Config merge: passed.
+  - MARS residual config: `ENABLED=True`, `MODE=residual`, `ALPHA=0.1`, `TEMP=1.0`, `LOG_STATS=True`, `OUTPUT_DIR=logs/qata_residual_a01_mars`.
+  - iLIDS residual config: `ENABLED=True`, `MODE=residual`, `ALPHA=0.1`, `TEMP=1.0`, `LOG_STATS=True`, `OUTPUT_DIR=logs/qata_residual_a01_ilids`.
+- QPool formula smoke test: passed.
+  - qpool output shape: `(2, 6)`
+  - residual output shape: `(2, 6)`
+  - weights shape: `(2, 8)`
+  - residual formula max error: `0.0`
+  - weight consistency max error: `0.0`
+- Synthetic 2-iteration train sanity: passed on GPU 2.
+  - Output dir: `logs/qata_residual_a01_sanity`
+  - Dummy losses: `6.431396`, `5.420898`
+  - `qpool_768_mode=residual`
+  - `qpool_768_alpha=0.1`
+  - `latest_weight_keys=['img', 'proj']`
+  - `qata_weight_stats.txt` was written successfully.
+
+Synthetic sanity weight stats:
+
+| Epoch | Branch | Mean | Std | Max | Min | Entropy | Effective Frames | Top1 | Top2 |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | img | 0.1250 | 0.002839 | 0.130463 | 0.120512 | 2.079180 | 7.997906 | 0.129316 | 0.257232 |
+| 1 | proj | 0.1250 | 0.002125 | 0.128914 | 0.121121 | 2.079293 | 7.998810 | 0.128271 | 0.255085 |
+
+### Recommended Full Training Commands
+
+MARS:
+
+```bash
+CUDA_VISIBLE_DEVICES=<free_gpu> /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_qata_residual_a01.yml OUTPUT_DIR logs/qata_residual_a01_mars_<timestamp>
+```
+
+iLIDS-VID:
+
+```bash
+CUDA_VISIBLE_DEVICES=<free_gpu> /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_ilids_qata_residual_a01.yml OUTPUT_DIR logs/qata_residual_a01_ilids_<timestamp>
+```

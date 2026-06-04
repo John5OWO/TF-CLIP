@@ -11,7 +11,11 @@ MODEL:
   SIE_CAMERA: True
   SIE_COE : 1.0
   QATA:
-    ENABLED: False
+    ENABLED: True
+    REDUCTION: 4
+    DROPOUT: 0.0
+    TEMP: 1.0
+    RETURN_WEIGHTS: False
 
 INPUT:
   SIZE_TRAIN: [256, 128]
@@ -75,4 +79,4 @@ DATASETS:
   NAMES: ('ilidsvidsequence')
   ROOT_DIR: ('/data1/lgf/TF-CLIP/data/iLIDS-VID')
 
-OUTPUT_DIR: 'logs/ilids_vit_clip_reid'
+OUTPUT_DIR: 'logs/ilids_vit_clip_reid_qata'

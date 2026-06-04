@@ -9,6 +9,7 @@ _tokenizer = _Tokenizer()
 from .clip.model import QuickGELU, LayerNorm
 # from .TAT import TemporalAttentionTransformer
 from .Visual_Prompt import visual_prompt
+from .quality_aggregation import QualityWeightedPooling
 
 
 def weights_init_kaiming(m):
@@ -192,6 +193,29 @@ class build_transformer(nn.Module):
         # self.temppool = visual_prompt(sim_head='meanP', T=cfg.INPUT.SEQ_LEN)
         self.TMD = Temporal_Memory_Difusion(width=768, layers=1, heads=12, droppath=None, T=cfg.INPUT.SEQ_LEN)
         # self.ln_post = LayerNorm(512)
+        self.qata_enabled = cfg.MODEL.QATA.ENABLED
+        self.qata_return_weights = cfg.MODEL.QATA.RETURN_WEIGHTS
+        self.qata_log_stats = cfg.MODEL.QATA.LOG_STATS
+        self.latest_qata_weights = None
+        if self.qata_enabled:
+            self.qpool_768 = QualityWeightedPooling(
+                self.in_planes,
+                reduction=cfg.MODEL.QATA.REDUCTION,
+                dropout=cfg.MODEL.QATA.DROPOUT,
+                temperature=cfg.MODEL.QATA.TEMP,
+                return_weights=cfg.MODEL.QATA.RETURN_WEIGHTS,
+                mode=cfg.MODEL.QATA.MODE,
+                alpha=cfg.MODEL.QATA.ALPHA,
+            )
+            self.qpool_512 = QualityWeightedPooling(
+                self.in_planes_proj,
+                reduction=cfg.MODEL.QATA.REDUCTION,
+                dropout=cfg.MODEL.QATA.DROPOUT,
+                temperature=cfg.MODEL.QATA.TEMP,
+                return_weights=cfg.MODEL.QATA.RETURN_WEIGHTS,
+                mode=cfg.MODEL.QATA.MODE,
+                alpha=cfg.MODEL.QATA.ALPHA,
+            )
 
 
     def forward(self, x = None, get_image = False, cam_label= None, view_label=None, text_features2=None):
@@ -260,8 +284,22 @@ class build_transformer(nn.Module):
             img_feature = img_feature.view(B, T, -1)  # torch.Size([16, 4, 768])
             img_feature_proj = img_feature_proj.view(B, T, -1)  # # torch.Size([16, 4, 512])
             # f_tp = self.temppool(img_feature_proj)  # b, 512
-            img_feature = img_feature.mean(1)  # torch.Size([16, 768])
-            img_feature_proj = img_feature_proj.mean(1)  # torch.Size([16, 512])
+            if self.qata_enabled:
+                need_qata_weights = self.qata_return_weights or self.qata_log_stats
+                if need_qata_weights:
+                    img_feature, qata_w_img = self.qpool_768(img_feature, return_weights=True)
+                    img_feature_proj, qata_w_proj = self.qpool_512(img_feature_proj, return_weights=True)
+                    self.latest_qata_weights = {
+                        'img': qata_w_img.detach(),
+                        'proj': qata_w_proj.detach(),
+                    }
+                else:
+                    img_feature = self.qpool_768(img_feature)
+                    img_feature_proj = self.qpool_512(img_feature_proj)
+                    self.latest_qata_weights = None
+            else:
+                img_feature = img_feature.mean(1)  # torch.Size([16, 768])
+                img_feature_proj = img_feature_proj.mean(1)  # torch.Size([16, 512])
             ###################################################
             ft_for_another_branch = image_features.detach()
             image_features_SAT = ft_for_another_branch.permute(1, 0, 2)  # BT, 768

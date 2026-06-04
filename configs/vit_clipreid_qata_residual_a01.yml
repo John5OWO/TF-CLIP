@@ -4,6 +4,7 @@ MODEL:
   IF_LABELSMOOTH: 'on'
   IF_WITH_CENTER: 'no'
   NAME: 'ViT-B-16'
+  # NAME: 'RN50'
   STRIDE_SIZE: [16, 16]
   ID_LOSS_WEIGHT : 0.25
   TRIPLET_LOSS_WEIGHT : 1.0
@@ -11,13 +12,20 @@ MODEL:
   SIE_CAMERA: True
   SIE_COE : 1.0
   QATA:
-    ENABLED: False
+    ENABLED: True
+    MODE: "residual"
+    ALPHA: 0.1
+    REDUCTION: 4
+    DROPOUT: 0.0
+    TEMP: 1.0
+    RETURN_WEIGHTS: False
+    LOG_STATS: True
 
 INPUT:
   SIZE_TRAIN: [256, 128]
   SIZE_TEST: [256, 128]
-  PROB: 0.5
-  RE_PROB: 0.5
+  PROB: 0.5 # random horizontal flip
+  RE_PROB: 0.5 # random erasing
   PADDING: 10
   PIXEL_MEAN: [0.5, 0.5, 0.5]
   PIXEL_STD: [0.5, 0.5, 0.5]
@@ -42,7 +50,7 @@ SOLVER:
     CHECKPOINT_PERIOD: 120
     LOG_PERIOD: 50
     WARMUP_EPOCHS: 5
-
+  
   STAGE2:
     IMS_PER_BATCH: 16
     OPTIMIZER_NAME: "Adam"
@@ -59,10 +67,10 @@ SOLVER:
     LOG_PERIOD: 50
     EVAL_PERIOD: 2
     BIAS_LR_FACTOR: 2
-
+    
     STEPS: [30, 50, 70]
     GAMMA: 0.1
-
+  
 TEST:
   EVAL: False
   IMS_PER_BATCH: 1
@@ -72,7 +80,7 @@ TEST:
   FEAT_NORM: 'yes'
 
 DATASETS:
-  NAMES: ('ilidsvidsequence')
-  ROOT_DIR: ('/data1/lgf/TF-CLIP/data/iLIDS-VID')
+  NAMES: ('mars')
+  ROOT_DIR: ('/data1/lgf/TF-CLIP/data/Mars')
 
-OUTPUT_DIR: 'logs/ilids_vit_clip_reid'
+OUTPUT_DIR: 'logs/qata_residual_a01_mars'
