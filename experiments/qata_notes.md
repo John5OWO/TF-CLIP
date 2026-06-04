@@ -410,3 +410,76 @@ iLIDS-VID:
 ```bash
 CUDA_VISIBLE_DEVICES=<free_gpu> /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_ilids_qata_residual_a01.yml OUTPUT_DIR logs/qata_residual_a01_ilids_<timestamp>
 ```
+
+## Residual QATA alpha=0.1 Full Training - 2026-06-04
+
+### Pre-checks
+
+- `git status --short`: clean.
+- MARS config checked:
+  - `MODEL.QATA.ENABLED=True`
+  - `MODEL.QATA.MODE="residual"`
+  - `MODEL.QATA.ALPHA=0.1`
+  - `MODEL.QATA.TEMP=1.0`
+  - `MODEL.QATA.LOG_STATS=True`
+- iLIDS config checked with the same QATA settings.
+- MARS output directory was unique and did not overwrite baseline/plain QATA logs.
+
+### MARS Command
+
+```bash
+CUDA_VISIBLE_DEVICES=2 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_qata_residual_a01.yml OUTPUT_DIR logs/qata_residual_a01_mars_20260604_185152
+```
+
+### Results
+
+| Dataset | Method | Config | Output Dir | mAP | Rank-1 | Rank-5 | Best Epoch | Train Time | Weight Stats | Notes |
+| ------- | ------ | ------ | ---------- | --: | -----: | -----: | ---------: | ---------- | ------------ | ----- |
+| MARS | Baseline | `configs/vit_clipreid.yml` | `logs/mars_vit_clip_reid_newprompt+dense_meanp` | 88.9 | 93.0 | 98.1 | 56 | 3:28:27.841264 | n/a | Original mean pooling baseline. |
+| MARS | Plain Minimal QATA | `configs/vit_clipreid_qata.yml` | `logs/qata_mars_20260603_214227` | 88.2 | 92.3 | 97.0 | 32 | 3:24:10.848671 | Near-uniform, no collapse | Direct qpool replacement hurt MARS. |
+| MARS | Residual QATA alpha=0.1 | `configs/vit_clipreid_qata_residual_a01.yml` | `logs/qata_residual_a01_mars_20260604_185152` | 89.2 | 93.0 | 98.1 | 42 | 4:21:59.837291 | Epoch 80 img eff 7.9244/top1 0.1445; proj eff 7.8204/top1 0.1583 | Saved `best_model.pth.tar`, `checkpoint_ep.pth.tar`, `train_log.txt`, and `qata_weight_stats.txt`. |
+| iLIDS-VID | Baseline | `configs/vit_clipreid_ilids.yml` | `logs/ilids_vit_clip_reid` | 76.9 | 81.2 | 86.7 | 28 | 2:13:16.290315 | n/a | Original mean pooling baseline. |
+| iLIDS-VID | Plain Minimal QATA | `configs/vit_clipreid_ilids_qata.yml` | `logs/qata_ilids_20260603_214227` | 75.6 | 79.8 | 86.8 | 26 | 2:14:50.775733 | Near-uniform, no collapse | Direct qpool replacement hurt iLIDS mAP/R1. |
+| iLIDS-VID | Residual QATA alpha=0.1 | `configs/vit_clipreid_ilids_qata_residual_a01.yml` | not started | n/a | n/a | n/a | n/a | n/a | n/a | Blocked after MARS because `nvidia-smi` failed and `torch.cuda.is_available()` returned False. |
+
+### MARS Observations
+
+- Residual QATA alpha=0.1 is clearly better than plain QATA on MARS:
+  - vs plain QATA: +1.0 mAP, +0.7 Rank-1, +1.1 Rank-5.
+  - vs baseline: +0.3 mAP, equal Rank-1, equal Rank-5.
+- Best log line reports `Best Perform 182.4%, achieved at epoch 42`.
+- Validation reached a stable plateau from roughly epoch 52 onward:
+  - several later epochs reported 89.2 / 93.0 / 98.1.
+- QATA weights did not collapse:
+  - epoch 80 img: entropy 2.0698, effective frames 7.9244, top1 0.1445, top2 0.2820.
+  - epoch 80 proj: entropy 2.0562, effective frames 7.8204, top1 0.1583, top2 0.3038.
+- The learned weights remain close to uniform but slightly sharper, especially on `img_feature_proj`. The gain is likely from a small residual correction rather than strong frame selection.
+
+### iLIDS Status
+
+After MARS finished, GPU checks failed:
+
+```bash
+nvidia-smi
+```
+
+returned:
+
+```text
+NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.
+```
+
+and:
+
+```bash
+/data1/lgf/miniconda3/envs/tfclip/bin/python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.device_count())"
+```
+
+returned:
+
+```text
+False
+0
+```
+
+Therefore iLIDS Residual QATA was not started to avoid an invalid run.
