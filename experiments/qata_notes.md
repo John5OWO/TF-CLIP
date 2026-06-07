@@ -483,3 +483,308 @@ False
 ```
 
 Therefore iLIDS Residual QATA was not started to avoid an invalid run.
+
+## Residual QATA alpha=0.1 MARS Repeat Attempt - 2026-06-05 01:44 CST
+
+### Pre-checks
+
+- `git status --short`: clean.
+- Code path checked:
+  - `MODEL.QATA.ENABLED=False` keeps baseline mean pooling.
+  - `MODEL.QATA.ENABLED=True`, `MODE="plain"` keeps first-round plain QATA behavior.
+  - `MODEL.QATA.ENABLED=True`, `MODE="residual"`, `ALPHA=0.1` uses `mean_pool + alpha * (qpool - mean_pool)`.
+- Config merge for `configs/vit_clipreid_qata_residual_a01.yml`:
+  - `MODEL.QATA.ENABLED=True`
+  - `MODEL.QATA.MODE=residual`
+  - `MODEL.QATA.ALPHA=0.1`
+  - `MODEL.QATA.TEMP=1.0`
+  - `MODEL.QATA.LOG_STATS=True`
+  - default `OUTPUT_DIR=logs/qata_residual_a01_mars`
+
+### GPU Status
+
+Repeat training was not started because GPU/CUDA was unavailable during the pre-check.
+
+```bash
+nvidia-smi
+```
+
+returned:
+
+```text
+NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.
+```
+
+and:
+
+```bash
+/data1/lgf/miniconda3/envs/tfclip/bin/python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.device_count())"
+```
+
+returned:
+
+```text
+False
+0
+```
+
+Next command to run after GPU recovery:
+
+```bash
+CUDA_VISIBLE_DEVICES=<free_gpu> /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_qata_residual_a01.yml OUTPUT_DIR logs/qata_residual_a01_mars_repeat_<timestamp>
+```
+
+## Residual QATA alpha=0.1 MARS Repeat Completed - 2026-06-05
+
+### Command
+
+```bash
+CUDA_VISIBLE_DEVICES=2 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_qata_residual_a01.yml OUTPUT_DIR logs/qata_residual_a01_mars_repeat_20260605_022703
+```
+
+This run used escalated permissions because the sandboxed environment could not access NVML/CUDA, while the escalated pre-check showed 4 available RTX 4090 GPUs. GPU 2 was selected.
+
+### Result
+
+| Dataset | Method | Config | Output Dir | mAP | Rank-1 | Rank-5 | Best Epoch | Train Time | Notes |
+|---|---|---|---|---:|---:|---:|---:|---|---|
+| MARS | Residual QATA alpha=0.1 repeat | `configs/vit_clipreid_qata_residual_a01.yml` | `logs/qata_residual_a01_mars_repeat_20260605_022703` | 89.1 | 93.3 | 97.8 | 42 | 4:21:46.407493 | Log-selected best by `mAP + Rank-1`; highest mAP plateau reached 89.2 from epoch 52 onward. |
+
+Additional peak-mAP checkpoints:
+
+| Epoch | mAP | Rank-1 | Rank-5 |
+|---:|---:|---:|---:|
+| 52 | 89.2 | 93.0 | 97.9 |
+| 56 | 89.2 | 93.0 | 98.1 |
+| 64 | 89.2 | 93.0 | 98.1 |
+| 66 | 89.2 | 93.0 | 98.1 |
+| 68 | 89.2 | 93.0 | 98.1 |
+| 74 | 89.2 | 93.0 | 98.1 |
+| 76 | 89.2 | 93.0 | 98.1 |
+| 78 | 89.2 | 93.0 | 98.1 |
+| 80 | 89.2 | 93.0 | 98.1 |
+
+Artifacts checked:
+
+- `best_model.pth.tar`: present.
+- `checkpoint_ep.pth.tar`: present.
+- `train_log.txt`: present.
+- `qata_weight_stats.txt`: present.
+
+### Comparison
+
+| Method | mAP | Rank-1 | Rank-5 | Best Epoch |
+|---|---:|---:|---:|---:|
+| Baseline | 88.9 | 93.0 | 98.1 | 56 |
+| Plain QATA | 88.2 | 92.3 | 97.0 | 32 |
+| Residual QATA alpha=0.1 first run | 89.2 | 93.0 | 98.1 | 42 |
+| Residual QATA alpha=0.1 repeat | 89.2 | 93.0 | 98.1 | 56/64/66/68/74/76/78/80 |
+
+### Weight Stats
+
+Epoch 80 repeat:
+
+- `img`: effective frames 7.9244, top1 0.1445, top2 0.2820.
+- `proj`: effective frames 7.8204, top1 0.1583, top2 0.3038.
+
+This almost exactly matches the first Residual QATA alpha=0.1 run:
+
+- first run epoch 80 `img`: effective frames about 7.92, top1 about 0.1445.
+- first run epoch 80 `proj`: effective frames about 7.82, top1 about 0.1583.
+
+Interpretation:
+
+- QATA weights are still close to uniform, not collapsed.
+- `img_feature_proj` is consistently sharper than `img_feature`, but still conservative.
+- Residual QATA alpha=0.1 behaves as a small correction to mean pooling rather than hard frame selection.
+- Compared with Plain QATA, Residual QATA is much more stable and recovers baseline performance while giving a repeatable mAP improvement on MARS.
+
+### Current Recommendation
+
+- Residual QATA alpha=0.1 on MARS is worth keeping as the strongest feature-aggregation result so far.
+- The repeated MARS result supports the +0.3 mAP claim in the peak-mAP plateau sense, although the log-selected `mAP + Rank-1` best epoch is 42 with mAP 89.1 / Rank-1 93.3.
+- Before running alpha=0.2, run iLIDS alpha=0.1 to verify cross-dataset behavior.
+- Do not expand to TMD, dense inference, or CLIP-Memory yet. Quality-Aware CLIP-Memory Construction can be prepared conceptually, but should wait until iLIDS alpha=0.1 is known.
+
+## iLIDS Residual QATA alpha=0.1 Attempt - 2026-06-05
+
+### Pre-checks
+
+- `git status --short`: only `experiments/qata_notes.md` was modified from experiment recording; no core code changes.
+- `configs/vit_clipreid_ilids_qata_residual_a01.yml` checked:
+  - `MODEL.QATA.ENABLED=True`
+  - `MODEL.QATA.MODE="residual"`
+  - `MODEL.QATA.ALPHA=0.1`
+  - `MODEL.QATA.TEMP=1.0`
+  - `MODEL.QATA.LOG_STATS=True`
+  - `OUTPUT_DIR='logs/qata_residual_a01_ilids'`
+- No existing `logs/qata_residual_a01_ilids_*` output directory was found, so a timestamped output directory would not overwrite prior logs.
+
+### GPU Status
+
+Training was not started because the required GPU pre-check failed, even with escalated permissions:
+
+```bash
+nvidia-smi
+```
+
+returned:
+
+```text
+Failed to initialize NVML: Driver/library version mismatch
+NVML library version: 535.309
+```
+
+Next command after GPU/NVML recovery:
+
+```bash
+CUDA_VISIBLE_DEVICES=<free_gpu> /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_ilids_qata_residual_a01.yml OUTPUT_DIR logs/qata_residual_a01_ilids_<timestamp>
+```
+
+## iLIDS Residual QATA alpha=0.1 Full Run - 2026-06-07
+
+### Pre-checks
+
+- `git status --short`: `experiments/qata_notes.md` already modified for experiment notes; no core code changes were made for this run.
+- `nvidia-smi`: GPU 0 and GPU 2 were idle; GPU 0 was selected.
+- Config checked: `configs/vit_clipreid_ilids_qata_residual_a01.yml`
+  - `MODEL.QATA.ENABLED=True`
+  - `MODEL.QATA.MODE="residual"`
+  - `MODEL.QATA.ALPHA=0.1`
+  - `MODEL.QATA.TEMP=1.0`
+  - `MODEL.QATA.LOG_STATS=True`
+
+The first started run at `logs/qata_residual_a01_ilids_20260607_030733` was interrupted around epoch 4 and kept as an incomplete log. The completed full run used a new directory:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_ilids_qata_residual_a01.yml OUTPUT_DIR logs/qata_residual_a01_ilids_20260607_031850
+```
+
+### Result
+
+| Dataset | Method | Config | Output Dir | mAP | Rank-1 | Rank-5 | Best Epoch | Train Time | Notes |
+|---|---|---|---|---:|---:|---:|---:|---|---|
+| iLIDS-VID | Residual QATA alpha=0.1 | `configs/vit_clipreid_ilids_qata_residual_a01.yml` | `logs/qata_residual_a01_ilids_20260607_031850` | 76.2 | 80.3 | 86.2 | 28 | 2:16:23 | Better than plain QATA mAP, below current baseline. |
+
+Artifacts checked:
+
+- `best_model.pth.tar`: present.
+- `checkpoint_ep.pth.tar`: present.
+- `train_log.txt`: present.
+- `qata_weight_stats.txt`: present.
+
+### Comparison
+
+| Method | mAP | Rank-1 | Rank-5 | Best Epoch |
+|---|---:|---:|---:|---:|
+| Baseline | 76.9 | 81.2 | 86.7 | 28 |
+| Plain QATA | 75.6 | 79.8 | 86.8 | 26 |
+| Residual QATA alpha=0.1 | 76.2 | 80.3 | 86.2 | 28 |
+
+### Weight Stats
+
+Best epoch 28:
+
+- `img`: effective frames 7.9863, top1 0.1344, top2 0.2653.
+- `proj`: effective frames 7.9787, top1 0.1363, top2 0.2686.
+
+Final epoch 80:
+
+- `img`: effective frames 7.9850, top1 0.1340, top2 0.2649.
+- `proj`: effective frames 7.9810, top1 0.1351, top2 0.2666.
+
+Interpretation:
+
+- QATA weights remain very close to uniform for the whole iLIDS run.
+- The `proj` branch is slightly sharper than `img`, but the difference is small.
+- Compared with MARS, iLIDS weights are even more uniform, so Residual QATA behaves almost like mean pooling plus a very small learned perturbation.
+- The validation curve peaks around epoch 26-28, then gradually settles near mAP 75.1-75.3 after epoch 50, indicating no late recovery.
+
+### Conclusion
+
+- iLIDS Residual QATA alpha=0.1 is better than plain QATA in mAP and Rank-1: `76.2/80.3` vs `75.6/79.8`.
+- It does not beat the current iLIDS baseline: `76.2/80.3/86.2` vs `76.9/81.2/86.7`.
+- The cross-dataset trend is mixed: MARS improves stably by +0.3 mAP, while iLIDS remains below baseline by -0.7 mAP.
+- Since iLIDS baseline/protocol is already known to be less reliable than MARS, this does not fully invalidate Residual QATA, but it weakens the case for continuing ordinary feature aggregation.
+- Do not run alpha=0.2 as the next priority unless a cheap confirmatory run is needed. The better next research direction is preparing Quality-Aware CLIP-Memory Construction conceptually, without implementing it yet.
+
+## MARS Residual QATA alpha=0.2 Full Run - 2026-06-07
+
+### Pre-checks
+
+- `nvidia-smi`: GPU 0 was occupied by the running iLIDS QATA job; GPU 2 was idle and selected for this run.
+- No core code was modified.
+- Added config: `configs/vit_clipreid_qata_residual_a02.yml`.
+- Config source: copied from `configs/vit_clipreid_qata_residual_a01.yml`.
+- Config difference:
+  - `MODEL.QATA.ENABLED=True`
+  - `MODEL.QATA.MODE="residual"`
+  - `MODEL.QATA.ALPHA=0.2`
+  - `MODEL.QATA.TEMP=1.0`
+  - `MODEL.QATA.LOG_STATS=True`
+- `OUTPUT_DIR` was overridden in the training command.
+
+Sanity check passed:
+
+```bash
+/data1/lgf/miniconda3/envs/tfclip/bin/python -m py_compile config/defaults.py model/quality_aggregation.py model/make_model_clipreid.py processor/processor_clipreid_stage2.py
+```
+
+Training command:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py --config_file configs/vit_clipreid_qata_residual_a02.yml OUTPUT_DIR logs/qata_residual_a02_mars_20260607_032430
+```
+
+Start/end:
+
+- Start: `2026-06-07 03:24:51 +0800`
+- End: `2026-06-07 06:51:25 +0800`
+- Wall-clock elapsed: `3:26:34`
+- Exit status: `0`
+
+### Result
+
+| Dataset | Method | Config | Output Dir | mAP | Rank-1 | Rank-5 | Best Epoch | Train Time | Notes |
+|---|---|---|---|---:|---:|---:|---:|---|---|
+| MARS | Residual QATA alpha=0.2 | `configs/vit_clipreid_qata_residual_a02.yml` | `logs/qata_residual_a02_mars_20260607_032430` | 89.2 | 93.1 | 97.9 | 54 | 3:26:34 | mAP ties alpha=0.1; Rank-1 +0.1; Rank-5 -0.2. |
+
+Artifacts checked:
+
+- `best_model.pth.tar`: present.
+- `checkpoint_ep.pth.tar`: present.
+- `train_log.txt`: present.
+- `qata_weight_stats.txt`: present.
+- `run_meta.txt`: present.
+
+### Comparison
+
+| Method | mAP | Rank-1 | Rank-5 | Notes |
+|---|---:|---:|---:|---|
+| Baseline | 88.9 | 93.0 | 98.1 | Reference baseline |
+| Plain QATA | 88.2 | 92.3 | 97.0 | Worse than baseline |
+| Residual QATA alpha=0.1 first | 89.2 | 93.0 | 98.1 | Stable gain in mAP |
+| Residual QATA alpha=0.1 repeat | 89.2 | 93.0 | 98.1 | Reproduced |
+| Residual QATA alpha=0.2 | 89.2 | 93.1 | 97.9 | No clear improvement over alpha=0.1 |
+
+### Weight Stats
+
+Final epoch 80:
+
+- `img`: mean 0.1250, std 0.0236, effective frames 7.8430, top1 0.1536, top2 0.2975.
+- `proj`: mean 0.1250, std 0.0399, effective frames 7.5704, top1 0.1801, top2 0.3388.
+
+Interpretation:
+
+- The weights remain smooth and close to uniform overall.
+- Compared with a purely uniform 8-frame average, the `img` branch is still a weak perturbation.
+- The `proj` branch is more selective than `img`, but still far from hard frame selection.
+
+### Conclusion
+
+- Alpha `0.2` is not clearly better than alpha `0.1`: mAP is tied, Rank-1 is slightly higher, and Rank-5 is slightly lower.
+- Alpha `0.2` is still above baseline on mAP and Rank-1, but not on Rank-5.
+- This does not prove QATA can only work as a very weak residual correction, because alpha `0.2` did not materially collapse. It does suggest that simply increasing residual strength is not reliably beneficial.
+- Keep alpha `0.1` as the safer fixed default for MARS.
+- Next ablations worth running: alpha `0.05` and learnable residual alpha initialized near `0.1`.
+- Quality-Aware CLIP-Memory Construction can be prepared as the next phase, but should use a separate config flag and start from the safer residual setting rather than hard-coding alpha `0.2`.
