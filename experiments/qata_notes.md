@@ -1404,3 +1404,265 @@ Experiments to avoid for now:
 - Extending QATA to TMD, CLIP-Memory SSP internals, or dense inference before memory construction is isolated.
 
 Revised conclusion: the previous "Memory Construction Only" idea needs a stronger constraint. It is feasible only if the memory quality scores are deterministic or if qpool is loaded from a trained checkpoint before memory construction. The cleanest next step is Deterministic Quality Memory, not random/untrained qpool memory.
+
+## Memory Weight Diagnosis Plan - 2026-06-10
+
+Current checkout note:
+
+- Current branch observed during this diagnosis: `exp-qata`.
+- The saved MARS memory-only run exists under `logs/memory_consistency_a01_mars_20260608_023602`.
+- The current checkout does not contain `configs/vit_clipreid_memory_consistency_a01.yml` or the memory-construction implementation in `processor/processor_clipreid_stage2.py`.
+- Therefore this section is based on saved logs and prior recorded implementation behavior. Before implementing any new memory variant, switch back to or restore `exp-memory-consistency`.
+
+### Existing Memory Stats
+
+Read from `logs/memory_consistency_a01_mars_20260608_023602/memory_construction_stats.txt`:
+
+```text
+enabled=True
+mode=consistency_residual
+alpha=0.100000
+tau=1.000000
+num_ids=625
+mean_entropy=2.300781
+mean_effective_samples=13.273438
+mean_top1_weight=0.130371
+mean_samples_per_id=13.276800
+max_weight_sum_error=0.000000
+```
+
+Interpretation:
+
+- `mean_effective_samples` is almost identical to `mean_samples_per_id`, so the memory weights are effectively uniform within most identities.
+- `mean_top1_weight=0.1304` alone is not enough to judge sharpness, because IDs have different sample counts. The stronger evidence is the effective-sample statistic.
+- Current consistency-aware memory is therefore nearly the original equal-mean memory plus a very small residual perturbation.
+
+Missing statistics:
+
+- Per-ID cosine similarity mean/std/min/max.
+- Global cosine similarity histogram/range.
+- Per-ID score range before softmax.
+- Weight distribution under alternative temperatures.
+- Outlier counts per ID.
+- Correlation between low-consistency sequences and noisy tracklets.
+- Per-ID sample count distribution, especially `mean(1 / samples_per_id)` for a proper top-1 uniform baseline.
+
+### Why tau=1.0 Produced Nearly Uniform Weights
+
+For one ID with `n` samples, if the best sequence score is `Delta` larger than all others, the approximate top-1 softmax weight is:
+
+```text
+p_top1 = exp(Delta / tau) / (exp(Delta / tau) + n - 1)
+```
+
+With `tau=1.0`, cosine-score gaps must be large to create meaningful selection. In CLIP feature space, same-ID sequence features are likely already close to their ID mean, so `Delta` is probably small. That makes `softmax(cos / 1.0)` almost uniform.
+
+Representative top-1 weights for `n=13`:
+
+| Score Gap Delta | tau=1.0 | tau=0.1 | tau=0.05 | tau=0.01 |
+|---:|---:|---:|---:|---:|
+| 0.005 | 0.077 | 0.081 | 0.084 | 0.121 |
+| 0.010 | 0.078 | 0.084 | 0.092 | 0.185 |
+| 0.020 | 0.078 | 0.092 | 0.111 | 0.381 |
+| 0.050 | 0.081 | 0.121 | 0.185 | 0.925 |
+| 0.100 | 0.084 | 0.185 | 0.381 | 0.999 |
+| 0.200 | 0.092 | 0.381 | 0.820 | 1.000 |
+
+This table shows why blindly running `MEMORY_TEMP=0.1` is risky:
+
+- If actual score gaps are around `0.005-0.02`, `tau=0.1` will still be weak.
+- If actual score gaps are around `0.05-0.1`, `tau=0.05` or `0.01` may collapse to one sequence.
+- Without the real cosine distribution, temperature selection is guesswork.
+
+### CPU-Only Diagnostic Script Design
+
+Goal: simulate memory weights without launching full training.
+
+Required inputs:
+
+- Stage2 config.
+- A checkpoint/model capable of producing `model(img, get_image=True)` sequence-level features.
+- `train_loader_stage1` for MARS.
+
+If sequence-level features `[N, 512]` are not already saved, exact diagnosis requires re-extracting them. This can be attempted CPU-only, but CLIP ViT feature extraction on CPU may be very slow. If CPU extraction is impractical, run only a short feature-extraction job later after explicit GPU approval; do not start full training.
+
+Diagnostic procedure:
+
+1. Build dataloader and model.
+2. Extract `features: [N, 512]` and labels from `train_loader_stage1` using the same `get_image=True` path used for CLIP-Memory.
+3. For each ID:
+   - compute equal mean prototype.
+   - L2-normalize features and prototype.
+   - compute cosine similarities.
+   - record similarity mean/std/min/max/range.
+   - compute weights for `tau in {1.0, 0.5, 0.1, 0.05, 0.01}`.
+   - record entropy, effective samples, top1/top2 weight, and bottom1 weight.
+   - count outliers below `mean - std`, `mean - 2 * std`, and bottom `10%`.
+4. Aggregate global stats and write:
+   - `memory_similarity_stats.csv`
+   - `memory_tau_simulation.csv`
+   - optional histograms as text bins.
+
+Decision criteria:
+
+- If cosine similarity ranges are extremely narrow, consistency score has weak quality discrimination and memory construction should stop or switch score type.
+- If ranges are meaningful but tau=1.0 is too smooth, try lower temperature only after simulation shows non-collapse.
+- If outliers exist but top weights are still diffuse, use outlier suppression or robust mean instead of top-heavy softmax.
+
+### Candidate Variants
+
+Candidate A: Low-Temperature Consistency Memory
+
+- Use `MEMORY_TEMP=0.1` or `0.05`.
+- Keep `MEMORY_ALPHA=0.1` first; only use `0.2` if simulation remains too weak.
+- Risk: may overweight the most central/redundant sequence rather than the highest-quality sequence.
+- Do not run full training until weight simulation shows effective samples are reduced but not collapsed.
+
+Candidate B: Outlier-Suppressed Memory
+
+- Compute cosine similarity to ID mean.
+- Drop the lowest `k%` samples or samples below `mean - std`.
+- Average the remaining samples.
+- Motivation: the actual problem is likely low-quality outliers, not choosing a single best sequence.
+- This is more aligned with robustness than softmax sharpening.
+
+Candidate C: Residual Robust Memory
+
+- Use trimmed mean or top-p mean, then residual update:
+  - `memory = mean + alpha * (robust_mean - mean)`
+- Keep alpha small, such as `0.1`.
+- This avoids strong prototype drift and is easier to defend as a robust estimator.
+
+Candidate D: Stop Memory Construction
+
+- If cosine similarity has weak discrimination and no meaningful outlier pattern, stop this route.
+- Focus on Residual QATA feature-only, where MARS already showed stable positive signal.
+
+### Recommendation
+
+- Do not run iLIDS memory-only.
+- Do not blindly run `MEMORY_ALPHA` or `MEMORY_TEMP` sweeps.
+- The next step should be CPU-only or feature-extraction-only memory weight simulation.
+- If simulation shows real outliers, prioritize `Outlier-Suppressed Memory` or `Residual Robust Memory` over pure low-temperature softmax.
+- If simulation only shows narrow same-ID cosine ranges, stop memory construction and return to Residual QATA feature-only for visualization, ablation, and paper analysis.
+- Current best publishable direction remains Residual QATA feature-only a=0.1, because it has a cleaner ablation and stable MARS gain.
+
+## QATA Stage Summary - 2026-06-10
+
+Full standalone report:
+
+- `experiments/qata_stage_summary.md`
+
+Scope:
+
+- Current branch: `exp-qata`.
+- Memory consistency branch is paused.
+- No new training was run for this summary.
+- No model, processor, or config code was modified.
+
+### Unified Results
+
+| Dataset | Method | Config | Output Dir | mAP | Rank-1 | Rank-5 | Best Epoch | Conclusion |
+|---|---|---|---|---:|---:|---:|---:|---|
+| MARS | Baseline | `configs/vit_clipreid.yml` | `logs/mars_vit_clip_reid_newprompt+dense_meanp` | 88.9 | 93.0 | 98.1 | 56 | Current main baseline |
+| MARS | Plain QATA | `configs/vit_clipreid_qata.yml` | `logs/qata_mars_20260603_214227` | 88.2 | 92.3 | 97.0 | 32 | Clear regression |
+| MARS | Residual QATA a=0.1 | `configs/vit_clipreid_qata_residual_a01.yml` | `logs/qata_residual_a01_mars_20260604_185152` | 89.2 | 93.0 | 98.1 | 42 | +0.3 mAP, Rank metrics preserved |
+| MARS | Residual QATA a=0.1 repeat | `configs/vit_clipreid_qata_residual_a01.yml` | `logs/qata_residual_a01_mars_repeat_20260605_022703` | 89.2 | 93.0 | 98.1 | 56/64/66/68/74/76/78/80 | Reproduced +0.3 mAP plateau |
+| MARS | Residual QATA a=0.2 | `configs/vit_clipreid_qata_residual_a02.yml` | `logs/qata_residual_a02_mars_20260607_032430` | 89.2 | 93.1 | 97.9 | 54 | Not clearly better than a=0.1 |
+| MARS | Consistency Memory a=0.1 | `configs/vit_clipreid_memory_consistency_a01.yml` | `logs/memory_consistency_a01_mars_20260608_023602` | 88.7 | 92.7 | 97.4 | 48 | Below baseline; memory weights nearly uniform |
+| iLIDS-VID | Baseline | `configs/vit_clipreid_ilids.yml` | `logs/ilids_vit_clip_reid` | 76.9 | 81.2 | 86.7 | 28 | Current reproduced baseline |
+| iLIDS-VID | Plain QATA | `configs/vit_clipreid_ilids_qata.yml` | `logs/qata_ilids_20260603_214227` | 75.6 | 79.8 | 86.8 | 26 | mAP / Rank-1 regression |
+| iLIDS-VID | Residual QATA a=0.1 | `configs/vit_clipreid_ilids_qata_residual_a01.yml` | `logs/qata_residual_a01_ilids_20260607_031850` | 76.2 | 80.3 | 86.2 | 28 | Better than plain QATA, below baseline |
+
+Diagnostic runs:
+
+| Dataset | Method | Output Dir | Epochs | Key Observation |
+|---|---|---|---:|---|
+| MARS | Plain QATA weight diag | `logs/qata_diag_mars_20260604_154211` | 5 | effective frames close to 8; top1 around 0.14; weights near-uniform |
+| iLIDS-VID | Plain QATA weight diag | `logs/qata_diag_ilids_20260604_154211` | 5 | effective frames close to 8; top1 around 0.14; weights near-uniform |
+
+### Main Interpretation
+
+Plain QATA failed because it directly replaced a strong mean-pooling baseline with a learnable qpool that did not learn reliable quality separation. The diagnostic runs showed near-uniform weights rather than collapse. This means the added module mostly introduced noise and unconstrained feature perturbation, especially harmful for an already tuned CLIP video representation.
+
+Residual QATA is more stable because it keeps mean pooling as the dominant path:
+
+```text
+pooled = mean_pool + alpha * (qpool - mean_pool)
+```
+
+With `alpha=0.1`, the learned qpool can only make a bounded correction. This explains why it recovers baseline behavior and improves MARS mAP, while plain QATA degrades both MARS and iLIDS.
+
+### MARS Meaning and Limits
+
+MARS gives the strongest positive result:
+
+- Residual QATA a=0.1: stable `89.2` mAP across two runs.
+- Baseline: `88.9` mAP.
+- Rank-1 / Rank-5 are essentially preserved.
+
+This supports keeping Residual QATA as a low-risk feature aggregation module. The limitation is that the gain is small, Rank metrics do not consistently improve, and qpool weights remain close to uniform. The current evidence supports “conservative residual aggregation,” not strong frame-quality selection.
+
+### iLIDS Interpretation
+
+iLIDS Residual QATA a=0.1 improves over plain QATA but remains below baseline:
+
+- Baseline: `76.9 / 81.2 / 86.7`
+- Plain QATA: `75.6 / 79.8 / 86.8`
+- Residual QATA: `76.2 / 80.3 / 86.2`
+
+Possible causes:
+
+- iLIDS is smaller and more volatile.
+- The current iLIDS baseline/protocol is already less reliable than MARS.
+- QATA weights on iLIDS are even closer to uniform.
+- The residual correction does not provide late-epoch generalization recovery.
+
+This weakens the case for expanding ordinary feature-level QATA, but does not erase the reproducible MARS signal.
+
+### Memory Consistency Interpretation
+
+Consistency Memory a=0.1 underperformed baseline:
+
+- Result: `88.7 / 92.7 / 97.4`
+- Baseline: `88.9 / 93.0 / 98.1`
+
+Memory stats:
+
+- mean effective samples: `13.2734`
+- mean samples per ID: `13.2768`
+- mean top1 weight: `0.1304`
+
+The effective sample count is almost identical to the sample count, so the memory weighting nearly degenerates to equal mean. Current consistency-to-ID-mean scoring either has weak discrimination or `tau=1.0` is too smooth. Since memory is built once and fixed at stage2 start, this version does not justify more blind memory alpha/temp sweeps.
+
+### Recommendation
+
+Continue QATA only in a narrowed form:
+
+- Keep Residual QATA feature-only as the strongest current result.
+- Stop plain QATA.
+- Pause memory consistency.
+- Do not run iLIDS memory-only.
+- Do not expand to TMD, SSP internals, CLIP-Memory, or dense inference yet.
+
+If writing a paper, QATA can be a lightweight residual temporal aggregation submodule and a useful ablation story. It should not be positioned as the sole core contribution, a strong quality selector, or evidence for CLIP-Memory learning.
+
+### Next Three Directions
+
+1. Low risk: Residual QATA visualization and statistical analysis.
+   - Use existing logs/checkpoints.
+   - Visualize high-weight and low-weight frames.
+   - Determine whether QATA learns quality or acts as regularization.
+
+2. Medium risk: Residual QATA with deterministic quality priors.
+   - Add feature norm, frame-to-sequence consistency, or temporal stability as weak hints.
+   - Keep residual form to avoid plain-QATA instability.
+
+3. Medium-high risk: Robust Memory instead of softmax memory.
+   - Use trimmed mean / outlier suppression / residual robust mean.
+   - Only revisit after feature/similarity diagnostics, not blind temp/alpha sweeps.
+
+Short-term decision:
+
+- Do not run more training immediately.
+- Consolidate Residual QATA feature-only analysis, visualization, and paper framing first.
