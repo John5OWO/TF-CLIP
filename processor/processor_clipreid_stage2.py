@@ -12,17 +12,120 @@ from torch.nn import functional as F
 from loss.supcontrast import SupConLoss
 from loss.softmax_loss import CrossEntropyLabelSmooth
 
+
+@torch.no_grad()
+def build_mean_memory(features, labels):
+    import collections
+    centers = collections.defaultdict(list)
+    for i, label in enumerate(labels):
+        label = int(label.item()) if torch.is_tensor(label) else int(label)
+        if label == -1:
+            continue
+        centers[label].append(features[i])
+
+    centers = [
+        torch.stack(centers[idx], dim=0).mean(0) for idx in sorted(centers.keys())
+    ]
+
+    return torch.stack(centers, dim=0)
+
+
+@torch.no_grad()
+def build_consistency_memory(features, labels, num_classes=None, alpha=0.1, tau=1.0, eps=1e-6, return_stats=False):
+    if tau <= 0:
+        raise ValueError("tau must be positive")
+
+    import collections
+    centers = collections.defaultdict(list)
+    for i, label in enumerate(labels):
+        label = int(label.item()) if torch.is_tensor(label) else int(label)
+        if label == -1:
+            continue
+        centers[label].append(features[i])
+
+    memory_features = []
+    entropies = []
+    effective_samples = []
+    top1_weights = []
+    sample_counts = []
+    weight_sum_errors = []
+    keys = sorted(centers.keys())
+    if num_classes is not None:
+        keys = [idx for idx in range(num_classes) if idx in centers]
+
+    for idx in keys:
+        samples = torch.stack(centers[idx], dim=0)
+        mean_memory = samples.mean(0)
+        sample_count = samples.size(0)
+        sample_counts.append(float(sample_count))
+
+        if sample_count == 1:
+            weights = samples.new_ones(1)
+            weighted_memory = mean_memory
+        else:
+            samples_norm = F.normalize(samples, p=2, dim=1, eps=eps)
+            mean_norm = F.normalize(mean_memory.unsqueeze(0), p=2, dim=1, eps=eps).squeeze(0)
+            scores = torch.matmul(samples_norm, mean_norm) / tau
+            weights = torch.softmax(scores, dim=0)
+            weighted_memory = torch.sum(weights.unsqueeze(1) * samples, dim=0)
+
+        final_memory = mean_memory + alpha * (weighted_memory - mean_memory)
+        memory_features.append(final_memory)
+
+        safe_weights = weights.clamp_min(eps)
+        entropy = -(safe_weights * safe_weights.log()).sum()
+        entropies.append(entropy)
+        effective_samples.append(torch.exp(entropy))
+        top1_weights.append(weights.max())
+        weight_sum_errors.append(torch.abs(weights.sum() - 1.0))
+
+    memory_features = torch.stack(memory_features, dim=0)
+    if not return_stats:
+        return memory_features
+
+    stats = {
+        "enabled": True,
+        "mode": "consistency_residual",
+        "alpha": float(alpha),
+        "tau": float(tau),
+        "num_ids": len(keys),
+        "mean_entropy": torch.stack(entropies).mean().item() if entropies else 0.0,
+        "mean_effective_samples": torch.stack(effective_samples).mean().item() if effective_samples else 0.0,
+        "mean_top1_weight": torch.stack(top1_weights).mean().item() if top1_weights else 0.0,
+        "mean_samples_per_id": sum(sample_counts) / len(sample_counts) if sample_counts else 0.0,
+        "max_weight_sum_error": torch.stack(weight_sum_errors).max().item() if weight_sum_errors else 0.0,
+    }
+    return memory_features, stats
+
+
+def _log_memory_construction_stats(stats, output_dir, logger):
+    message = (
+        "Memory Construction Stats - enabled {enabled}, mode {mode}, alpha {alpha:.4f}, tau {tau:.4f}, "
+        "num_ids {num_ids}, mean_entropy {mean_entropy:.4f}, "
+        "mean_effective_samples {mean_effective_samples:.4f}, mean_top1_weight {mean_top1_weight:.4f}, "
+        "mean_samples_per_id {mean_samples_per_id:.4f}, max_weight_sum_error {max_weight_sum_error:.6f}"
+    ).format(**stats)
+    logger.info(message)
+
+    if output_dir:
+        stats_path = os.path.join(output_dir, "memory_construction_stats.txt")
+        with open(stats_path, "w") as stats_file:
+            stats_file.write("enabled,mode,alpha,tau,num_ids,mean_entropy,mean_effective_samples,mean_top1_weight,mean_samples_per_id,max_weight_sum_error\n")
+            stats_file.write(
+                "{enabled},{mode},{alpha:.6f},{tau:.6f},{num_ids},{mean_entropy:.6f},{mean_effective_samples:.6f},{mean_top1_weight:.6f},{mean_samples_per_id:.6f},{max_weight_sum_error:.6f}\n".format(**stats)
+            )
+
 def do_train_stage2(cfg,
-             model,
-             center_criterion,
-             train_loader_stage1,
-             train_loader_stage2,
-             val_loader,
-             optimizer,
-             optimizer_center,
-             scheduler,
-             loss_fn,
-             num_query, local_rank,num_classes):
+                    model,
+                    center_criterion,
+                    train_loader_stage1,
+                    train_loader_stage2,
+                    val_loader,
+                    optimizer,
+                    optimizer_center,
+                    scheduler,
+                    loss_fn,
+                    num_query, local_rank,num_classes):
     log_period = cfg.SOLVER.STAGE2.LOG_PERIOD
     eval_period = cfg.SOLVER.STAGE2.EVAL_PERIOD
 
@@ -48,19 +151,21 @@ def do_train_stage2(cfg,
     xent_frame = CrossEntropyLabelSmooth(num_classes=num_classes)
 
     @torch.no_grad()
-    def generate_cluster_features(labels, features):
-        import collections
-        centers = collections.defaultdict(list)
-        for i, label in enumerate(labels):
-            if label == -1:
-                continue
-            centers[labels[i]].append(features[i])
+    def generate_cluster_features(labels, features, qata_cfg=None, output_dir=None):
+        if qata_cfg is None or not qata_cfg.APPLY_MEMORY_CONSTRUCTION:
+            return build_mean_memory(features, labels)
+        if qata_cfg.MEMORY_MODE != "consistency_residual":
+            raise ValueError("Unsupported memory construction mode: {}".format(qata_cfg.MEMORY_MODE))
 
-        centers = [
-            torch.stack(centers[idx], dim=0).mean(0) for idx in sorted(centers.keys())
-        ]
-
-        centers = torch.stack(centers, dim=0)
+        centers, stats = build_consistency_memory(
+            features,
+            labels,
+            alpha=qata_cfg.MEMORY_ALPHA,
+            tau=qata_cfg.MEMORY_TEMP,
+            eps=qata_cfg.MEMORY_EPS,
+            return_stats=True,
+        )
+        _log_memory_construction_stats(stats, output_dir, logger)
         return centers
 
     def _unwrap_model(model):
@@ -189,7 +294,7 @@ def do_train_stage2(cfg,
         labels_list = torch.stack(labels, dim=0).cuda()  # N torch.Size([8256])
         image_features_list = torch.stack(image_features, dim=0).cuda()  # torch.Size([8256, 512])
 
-    cluster_features = generate_cluster_features(labels_list.cpu().numpy(), image_features_list).detach()
+    cluster_features = generate_cluster_features(labels_list.cpu().numpy(), image_features_list, cfg.MODEL.QATA, cfg.OUTPUT_DIR).detach()
     best_performance = 0.0
     best_epoch = 1
     for epoch in range(1, epochs + 1):

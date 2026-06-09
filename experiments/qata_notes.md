@@ -1404,3 +1404,250 @@ Experiments to avoid for now:
 - Extending QATA to TMD, CLIP-Memory SSP internals, or dense inference before memory construction is isolated.
 
 Revised conclusion: the previous "Memory Construction Only" idea needs a stronger constraint. It is feasible only if the memory quality scores are deterministic or if qpool is loaded from a trained checkpoint before memory construction. The cleanest next step is Deterministic Quality Memory, not random/untrained qpool memory.
+
+## 2026-06-08 Consistency-Aware CLIP-Memory Construction Implementation
+
+Branch:
+
+- `exp-memory-consistency`
+
+Scope:
+
+- Implemented the first minimal deterministic memory-construction variant.
+- No full training was started.
+- No GPU task was run.
+- No learnable qpool is used for memory construction.
+- `model/make_model_clipreid.py`, TMD, dense inference, and SSP loss were not modified.
+
+### Modified Files
+
+| File | Change |
+|---|---|
+| `config/defaults.py` | Added independent memory-construction config under `MODEL.QATA`. |
+| `processor/processor_clipreid_stage2.py` | Added deterministic mean-memory and consistency-residual memory helper functions; wired optional memory construction into `generate_cluster_features()`. |
+| `configs/vit_clipreid_memory_consistency_a01.yml` | Added MARS memory-only config with feature-level QATA disabled and consistency-aware memory enabled. |
+| `/tmp/check_consistency_memory.py` | Temporary CPU toy sanity script. |
+
+### New Config
+
+Defaults added:
+
+```yaml
+MODEL:
+  QATA:
+    APPLY_MEMORY_CONSTRUCTION: False
+    MEMORY_MODE: "consistency_residual"
+    MEMORY_ALPHA: 0.1
+    MEMORY_TEMP: 1.0
+    MEMORY_EPS: 1e-6
+```
+
+Important control separation:
+
+- `MODEL.QATA.ENABLED` controls feature-level QATA only.
+- `MODEL.QATA.APPLY_MEMORY_CONSTRUCTION` controls CLIP-Memory construction only.
+- First memory-only config sets `ENABLED=False` and `APPLY_MEMORY_CONSTRUCTION=True`.
+
+### Baseline Compatibility
+
+`generate_cluster_features(labels, features, qata_cfg=None, output_dir=None)` now does:
+
+- If `qata_cfg is None` or `APPLY_MEMORY_CONSTRUCTION=False`:
+  - calls `build_mean_memory(features, labels)`
+  - this preserves the original per-ID equal mean behavior:
+    - group sequence-level `[N, 512]` features by ID
+    - compute `torch.stack(...).mean(0)` per ID
+    - stack sorted IDs into `[num_classes, 512]`
+- If `APPLY_MEMORY_CONSTRUCTION=True`:
+  - checks `MEMORY_MODE == "consistency_residual"`
+  - calls `build_consistency_memory(...)`
+
+Therefore `APPLY_MEMORY_CONSTRUCTION=False` returns to original TF-CLIP mean memory construction.
+
+### Formula
+
+For each identity:
+
+1. Collect sequence-level features `f_j`.
+2. Compute equal mean:
+   - `mean_i = mean_j(f_j)`
+3. L2-normalize each `f_j` and `mean_i`.
+4. Compute sequence consistency:
+   - `s_j = cos(f_j, mean_i)`
+5. Compute ID-local weights:
+   - `w_j = softmax(s_j / tau)`
+6. Compute weighted memory:
+   - `weighted_i = sum_j(w_j * f_j)`
+7. Residual memory:
+   - `memory_i = mean_i + alpha * (weighted_i - mean_i)`
+
+Current defaults:
+
+- `alpha = 0.1`
+- `tau = 1.0`
+- `eps = 1e-6`
+
+If an ID has only one sequence sample, the output equals that sample.
+
+### Memory Stats
+
+When `APPLY_MEMORY_CONSTRUCTION=True`, memory construction writes one aggregate row to:
+
+- `OUTPUT_DIR/memory_construction_stats.txt`
+
+It also logs the same summary through `logger.info`.
+
+Recorded fields:
+
+- enabled
+- mode
+- alpha
+- tau
+- num_ids
+- mean entropy
+- mean effective samples
+- mean top1 weight
+- mean samples per ID
+- max weight-sum error
+
+No per-ID rows are printed or written.
+
+### Sanity Check
+
+Commands run:
+
+```bash
+/data1/lgf/miniconda3/envs/tfclip/bin/python -m py_compile processor/processor_clipreid_stage2.py config/defaults.py
+/data1/lgf/miniconda3/envs/tfclip/bin/python /tmp/check_consistency_memory.py
+```
+
+Toy test coverage:
+
+- `features` shape `[N, 512]`.
+- labels cover 3 IDs.
+- disabled/mean path output exactly matches manual ID mean.
+- enabled path output shape is `[num_classes, 512]`.
+- single-sample ID output equals the original sample.
+- `alpha=0` output equals mean memory.
+- `alpha=1` output equals manually computed weighted memory.
+- per-ID weights sum to 1.
+- no NaN/Inf.
+
+Result:
+
+- `py_compile`: passed.
+- toy sanity: passed.
+- config merge check: passed.
+  - `MODEL.QATA.ENABLED=False`
+  - `MODEL.QATA.APPLY_MEMORY_CONSTRUCTION=True`
+  - `MODEL.QATA.MEMORY_MODE="consistency_residual"`
+  - `MODEL.QATA.MEMORY_ALPHA=0.1`
+  - `MODEL.QATA.MEMORY_TEMP=1.0`
+  - `MODEL.QATA.LOG_STATS=False`
+
+Toy stats example:
+
+```text
+mean_entropy=0.5972
+mean_effective_samples=1.9998
+mean_top1_weight=0.6146
+mean_samples_per_id=2.0000
+max_weight_sum_error=0.000000
+```
+
+### Recommended MARS Memory-Only Training Command
+
+Do not run until explicitly approved.
+
+```bash
+CUDA_VISIBLE_DEVICES=<free_gpu> /data1/lgf/miniconda3/envs/tfclip/bin/python train.py \
+--config_file configs/vit_clipreid_memory_consistency_a01.yml \
+OUTPUT_DIR logs/memory_consistency_a01_mars_<timestamp>
+```
+
+Expected ablation meaning:
+
+- Feature aggregation: baseline mean pooling, because `MODEL.QATA.ENABLED=False`.
+- Memory construction: consistency-aware residual memory, because `APPLY_MEMORY_CONSTRUCTION=True`.
+- TMD, SSP loss, dense inference, and model forward remain unchanged.
+
+Next step:
+
+- It is reasonable to run MARS memory-only after checking GPU availability and confirming output directory timestamp.
+- Do not run iLIDS until MARS memory-only shows a clear signal or at least no regression.
+
+## MARS Memory Consistency alpha=0.1 Full Training - 2026-06-08
+
+### Command
+
+GPU selected from `nvidia-smi`: GPU 0.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py \
+--config_file configs/vit_clipreid_memory_consistency_a01.yml \
+OUTPUT_DIR logs/memory_consistency_a01_mars_20260608_023602
+```
+
+Run metadata:
+
+- Start: `2026-06-08 02:36:33 +0800`
+- End: `2026-06-08 05:58:57 +0800`
+- Elapsed: `12144s` (`3:22:24`)
+- Exit status: `0`
+
+Saved files:
+
+- `train_log.txt`
+- `memory_construction_stats.txt`
+- `best_model.pth.tar`
+- `checkpoint_ep.pth.tar`
+- `run_meta.txt`
+
+### Result
+
+| Dataset | Method | Config | Output Dir | mAP | Rank-1 | Rank-5 | Best Epoch | Train Time | Notes |
+|---|---|---|---|---:|---:|---:|---:|---|---|
+| MARS | Consistency Memory a=0.1 | `configs/vit_clipreid_memory_consistency_a01.yml` | `logs/memory_consistency_a01_mars_20260608_023602` | 88.7 | 92.7 | 97.4 | 48 | 3:22:24 | best by project criterion `mAP + Rank-1`; mAP-only late epochs reached 88.9 but Rank-1 stayed 92.2 |
+
+Reference comparison:
+
+| Method | mAP | Rank-1 | Rank-5 | Best Epoch |
+|---|---:|---:|---:|---:|
+| Baseline | 88.9 | 93.0 | 98.1 | 56 |
+| Plain QATA | 88.2 | 92.3 | 97.0 | 32 |
+| Residual QATA a=0.1 first | 89.2 | 93.0 | 98.1 | 42 |
+| Residual QATA a=0.1 repeat | 89.2 | 93.0 | 98.1 | 42 |
+| Consistency Memory a=0.1 | 88.7 | 92.7 | 97.4 | 48 |
+
+### Memory Construction Stats
+
+From `memory_construction_stats.txt`:
+
+```text
+enabled=True
+mode=consistency_residual
+alpha=0.100000
+tau=1.000000
+num_ids=625
+mean_entropy=2.300781
+mean_effective_samples=13.273438
+mean_top1_weight=0.130371
+mean_samples_per_id=13.276800
+max_weight_sum_error=0.000000
+```
+
+Analysis:
+
+- The consistency weights are extremely close to uniform at the identity level.
+- Average samples per ID is `13.2768`, while effective samples is `13.2734`.
+- Mean top-1 weight is only `0.1304`; with about 13 samples per ID, this indicates almost no strong sequence selection.
+- Therefore this memory-only version is deterministic and safe, but its current signal is weak.
+
+### Conclusion
+
+- Consistency-Aware CLIP-Memory Construction a=0.1 did not outperform the current MARS baseline under the project best criterion.
+- It underperformed Residual QATA feature-only a=0.1.
+- The method is not harmful in mAP-only late epochs, but Rank-1 and Rank-5 are lower than baseline.
+- The most likely reason is that cosine-to-ID-mean consistency produces nearly uniform weights, so the residual memory is almost identical to mean memory.
+- Do not start iLIDS memory-only yet unless the goal is negative-result confirmation.
+- If continuing memory construction, the next controlled variant should increase the weighting strength, for example lower `MEMORY_TEMP` or larger `MEMORY_ALPHA`, but only after deciding that memory construction remains worth GPU time.

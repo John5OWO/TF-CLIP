@@ -60,6 +60,11 @@ _C.MODEL.QATA.TEMP = 1.0
 _C.MODEL.QATA.RETURN_WEIGHTS = False
 _C.MODEL.QATA.LOG_STATS = False
 _C.MODEL.QATA.STATS_FILE = "qata_weight_stats.txt"
+_C.MODEL.QATA.APPLY_MEMORY_CONSTRUCTION = False
+_C.MODEL.QATA.MEMORY_MODE = "consistency_residual"
+_C.MODEL.QATA.MEMORY_ALPHA = 0.1
+_C.MODEL.QATA.MEMORY_TEMP = 1.0
+_C.MODEL.QATA.MEMORY_EPS = 1e-6
 
 # -----------------------------------------------------------------------------
 # INPUT
