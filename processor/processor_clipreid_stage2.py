@@ -12,6 +12,127 @@ from torch.nn import functional as F
 from loss.supcontrast import SupConLoss
 from loss.softmax_loss import CrossEntropyLabelSmooth
 
+
+@torch.no_grad()
+def build_single_prototype_features(labels, features):
+    import collections
+    centers = collections.defaultdict(list)
+    for i, label in enumerate(labels):
+        if label == -1:
+            continue
+        centers[int(label)].append(features[i])
+
+    centers = [
+        torch.stack(centers[idx], dim=0).mean(0) for idx in sorted(centers.keys())
+    ]
+
+    centers = torch.stack(centers, dim=0)
+    return centers
+
+
+@torch.no_grad()
+def build_multi_prototype_features(
+        features,
+        labels,
+        num_classes,
+        num_prototypes=2,
+        cluster_mode="farthest",
+        normalize_prototypes=True,
+        min_samples_per_proto=1,
+        return_stats=False):
+    if cluster_mode not in ("farthest", "duplicate_mean"):
+        raise NotImplementedError("Unsupported multi-prototype cluster_mode='{}'.".format(cluster_mode))
+    if cluster_mode == "farthest" and num_prototypes != 2:
+        raise NotImplementedError("The farthest multi-prototype version only supports K=2.")
+
+    labels_tensor = torch.as_tensor(labels, device=features.device, dtype=torch.long)
+    prototypes = []
+    sample_counts = []
+    proto_cosines = []
+    fallback_ids = 0
+    empty_cluster_fallbacks = 0
+    eps = 1e-12
+
+    for class_idx in range(num_classes):
+        class_features = features[labels_tensor == class_idx]
+        sample_count = int(class_features.size(0))
+        sample_counts.append(sample_count)
+
+        if sample_count == 0:
+            raise ValueError("No features found for class {} while building memory.".format(class_idx))
+
+        mean_proto = class_features.mean(dim=0)
+        if cluster_mode == "duplicate_mean":
+            class_prototypes = mean_proto.unsqueeze(0).repeat(num_prototypes, 1)
+        elif sample_count < num_prototypes:
+            fallback_ids += 1
+            class_prototypes = mean_proto.unsqueeze(0).repeat(num_prototypes, 1)
+        else:
+            norm_features = torch.nn.functional.normalize(class_features.float(), dim=1, eps=eps)
+            norm_mean = torch.nn.functional.normalize(mean_proto.float().unsqueeze(0), dim=1, eps=eps).squeeze(0)
+
+            dist_to_mean = 1.0 - torch.matmul(norm_features, norm_mean)
+            seed_a_idx = int(torch.argmax(dist_to_mean).item())
+            seed_a = class_features[seed_a_idx]
+            norm_seed_a = torch.nn.functional.normalize(seed_a.float().unsqueeze(0), dim=1, eps=eps).squeeze(0)
+
+            dist_to_seed_a = 1.0 - torch.matmul(norm_features, norm_seed_a)
+            seed_b_idx = int(torch.argmax(dist_to_seed_a).item())
+            seed_b = class_features[seed_b_idx]
+
+            seeds = torch.stack([seed_a, seed_b], dim=0)
+            norm_seeds = torch.nn.functional.normalize(seeds.float(), dim=1, eps=eps)
+            sim_to_seeds = torch.matmul(norm_features, norm_seeds.t())
+            assignments = torch.argmax(sim_to_seeds, dim=1)
+
+            proto_list = []
+            for proto_idx in range(num_prototypes):
+                member_features = class_features[assignments == proto_idx]
+                if int(member_features.size(0)) < min_samples_per_proto:
+                    empty_cluster_fallbacks += 1
+                    proto_list.append(mean_proto)
+                else:
+                    proto_list.append(member_features.mean(dim=0))
+            class_prototypes = torch.stack(proto_list, dim=0)
+
+        if normalize_prototypes and cluster_mode != "duplicate_mean":
+            class_prototypes = torch.nn.functional.normalize(class_prototypes.float(), dim=1, eps=eps).to(features.dtype)
+
+        if class_prototypes.size(0) == 2:
+            proto_cos = torch.nn.functional.cosine_similarity(
+                class_prototypes[0].float().unsqueeze(0),
+                class_prototypes[1].float().unsqueeze(0),
+                dim=1,
+                eps=eps,
+            )[0]
+            proto_cosines.append(proto_cos)
+
+        prototypes.append(class_prototypes)
+
+    prototypes = torch.stack(prototypes, dim=0)
+    if not torch.isfinite(prototypes).all():
+        raise ValueError("Non-finite values found in multi-prototype memory.")
+
+    if not return_stats:
+        return prototypes
+
+    sample_counts_tensor = torch.tensor(sample_counts, dtype=torch.float32)
+    proto_cosines_tensor = torch.stack(proto_cosines).float() if proto_cosines else torch.tensor([0.0])
+    stats = {
+        "num_classes": num_classes,
+        "num_prototypes": num_prototypes,
+        "mean_samples_per_id": sample_counts_tensor.mean().item(),
+        "min_samples_per_id": int(sample_counts_tensor.min().item()),
+        "max_samples_per_id": int(sample_counts_tensor.max().item()),
+        "fallback_ids": fallback_ids,
+        "empty_cluster_fallbacks": empty_cluster_fallbacks,
+        "proto_cosine_mean": proto_cosines_tensor.mean().item(),
+        "proto_cosine_std": proto_cosines_tensor.std(unbiased=False).item(),
+        "cluster_mode": cluster_mode,
+    }
+    return prototypes, stats
+
+
 def do_train_stage2(cfg,
              model,
              center_criterion,
@@ -49,19 +170,65 @@ def do_train_stage2(cfg,
 
     @torch.no_grad()
     def generate_cluster_features(labels, features):
-        import collections
-        centers = collections.defaultdict(list)
-        for i, label in enumerate(labels):
-            if label == -1:
-                continue
-            centers[labels[i]].append(features[i])
+        if not cfg.MODEL.MEMORY.MULTI_ENABLED:
+            return build_single_prototype_features(labels, features)
 
-        centers = [
-            torch.stack(centers[idx], dim=0).mean(0) for idx in sorted(centers.keys())
-        ]
-
-        centers = torch.stack(centers, dim=0)
+        centers, stats = build_multi_prototype_features(
+            features,
+            labels,
+            num_classes,
+            num_prototypes=cfg.MODEL.MEMORY.NUM_PROTOTYPES,
+            cluster_mode=cfg.MODEL.MEMORY.CLUSTER_MODE,
+            normalize_prototypes=cfg.MODEL.MEMORY.NORMALIZE_PROTOTYPES,
+            min_samples_per_proto=cfg.MODEL.MEMORY.MIN_SAMPLES_PER_PROTO,
+            return_stats=True,
+        )
+        _write_multiproto_stats(stats)
         return centers
+
+    def _write_multiproto_stats(stats):
+        stats["agg_mode"] = cfg.MODEL.MEMORY.AGG_MODE
+        logger.info(
+            "Multi-prototype Memory Stats - num_classes {}, num_prototypes {}, "
+            "mean_samples_per_id {:.4f}, min_samples_per_id {}, max_samples_per_id {}, "
+            "fallback_ids {}, empty_cluster_fallbacks {}, proto_cosine_mean {:.4f}, "
+            "proto_cosine_std {:.4f}, cluster_mode {}, agg_mode {}".format(
+                stats["num_classes"],
+                stats["num_prototypes"],
+                stats["mean_samples_per_id"],
+                stats["min_samples_per_id"],
+                stats["max_samples_per_id"],
+                stats["fallback_ids"],
+                stats["empty_cluster_fallbacks"],
+                stats["proto_cosine_mean"],
+                stats["proto_cosine_std"],
+                stats["cluster_mode"],
+                stats["agg_mode"],
+            )
+        )
+
+        stats_path = os.path.join(cfg.OUTPUT_DIR, "multiproto_memory_stats.txt")
+        with open(stats_path, "w") as stats_file:
+            stats_file.write(
+                "num_classes,num_prototypes,mean_samples_per_id,min_samples_per_id,"
+                "max_samples_per_id,fallback_ids,empty_cluster_fallbacks,"
+                "proto_cosine_mean,proto_cosine_std,cluster_mode,agg_mode\n"
+            )
+            stats_file.write(
+                "{},{},{:.6f},{},{},{},{},{:.6f},{:.6f},{},{}\n".format(
+                    stats["num_classes"],
+                    stats["num_prototypes"],
+                    stats["mean_samples_per_id"],
+                    stats["min_samples_per_id"],
+                    stats["max_samples_per_id"],
+                    stats["fallback_ids"],
+                    stats["empty_cluster_fallbacks"],
+                    stats["proto_cosine_mean"],
+                    stats["proto_cosine_std"],
+                    stats["cluster_mode"],
+                    stats["agg_mode"],
+                )
+            )
 
     def _unwrap_model(model):
         return model.module if hasattr(model, "module") else model

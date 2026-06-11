@@ -706,3 +706,586 @@ Multi-prototype CLIP-Memory 在当前 TF-CLIP 代码中是可行的，且可以�
 - 只跑 MARS
 
 最主要风险是 shape 分支和 SSP 输入维度处理。只要保证最终 `i2tscore=[B,num_classes]`，这个方向可以作为下一阶段主线推进。
+
+## J. Minimal Implementation Status - 2026-06-10
+
+### Branch / Worktree
+
+Commands run:
+
+```bash
+git branch
+git status --short --branch
+```
+
+Status:
+
+- Branch confirmed: `exp-multiproto-memory`.
+- No pre-existing uncommitted core-code changes were present before implementation.
+
+### Files Changed
+
+Core implementation files:
+
+- `config/defaults.py`
+- `processor/processor_clipreid_stage2.py`
+- `model/make_model_clipreid.py`
+
+New config:
+
+- `configs/vit_clipreid_multiproto_k2_farthest_lse.yml`
+
+No changes were made to:
+
+- `loss/make_loss.py`
+- TMD internals
+- dense inference
+- QATA forward logic
+
+### Implemented Logic
+
+Configuration:
+
+```python
+MODEL.MEMORY.MULTI_ENABLED = False
+MODEL.MEMORY.NUM_PROTOTYPES = 2
+MODEL.MEMORY.CLUSTER_MODE = "farthest"
+MODEL.MEMORY.AGG_MODE = "logsumexp"
+MODEL.MEMORY.AGG_TEMP = 0.07
+MODEL.MEMORY.NORMALIZE_PROTOTYPES = True
+MODEL.MEMORY.MIN_SAMPLES_PER_PROTO = 1
+```
+
+Memory construction:
+
+- `MULTI_ENABLED=False`: uses the original ID-wise mean memory path and returns `[num_classes, 512]`.
+- `MULTI_ENABLED=True`: builds `[num_classes, 2, 512]` using deterministic farthest-two seeds plus one-step assignment mean.
+- Single-sample IDs duplicate the same prototype.
+- Empty or underfilled clusters fallback to the ID mean.
+- K > 2 currently raises `NotImplementedError`.
+
+Model I2T scoring:
+
+- Single prototype path remains `[B, C]`.
+- Multi-prototype path computes `[B, C, K]`, then aggregates to `[B, C]`.
+- Supported aggregation modes:
+  - `max`
+  - `logsumexp`
+- Loss remains unchanged because final `i2tscore` is still `[B, num_classes]`.
+
+Stats:
+
+- Multi-prototype memory writes `OUTPUT_DIR/multiproto_memory_stats.txt`.
+- Fields:
+  - num_classes
+  - num_prototypes
+  - mean/min/max samples per ID
+  - fallback ID count
+  - empty cluster fallback count
+  - prototype cosine similarity mean/std
+  - cluster mode
+  - aggregation mode
+
+### Sanity Checks
+
+Syntax check:
+
+```bash
+/data1/lgf/miniconda3/envs/tfclip/bin/python -m py_compile \
+processor/processor_clipreid_stage2.py \
+model/make_model_clipreid.py \
+config/defaults.py
+```
+
+Result: passed.
+
+Config merge check:
+
+```text
+QATA.ENABLED False
+MEMORY.MULTI_ENABLED True
+MEMORY.NUM_PROTOTYPES 2
+MEMORY.CLUSTER_MODE farthest
+MEMORY.AGG_MODE logsumexp
+MEMORY.AGG_TEMP 0.07
+MEMORY.NORMALIZE_PROTOTYPES True
+```
+
+CPU toy script:
+
+```bash
+/data1/lgf/miniconda3/envs/tfclip/bin/python /tmp/check_multiproto_memory.py
+```
+
+Result:
+
+```text
+single_shape (3, 512)
+multi_shape (3, 2, 512)
+logits_max_shape (4, 3)
+logits_lse_shape (4, 3)
+sanity_check_passed
+```
+
+Covered:
+
+- single-prototype output `[num_classes, 512]`
+- multi-prototype output `[num_classes, 2, 512]`
+- single-sample ID duplicates prototypes
+- no NaN/Inf
+- `MULTI_ENABLED=False` matches original mean
+- max/logsumexp output `[B, num_classes]`
+- unchanged loss accepts `[B, num_classes]`
+
+### GPU Gate
+
+Commands run without sudo and without permission escalation:
+
+```bash
+which nvidia-smi
+nvidia-smi
+/data1/lgf/miniconda3/envs/tfclip/bin/python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+print("device count:", torch.cuda.device_count())
+if torch.cuda.is_available():
+    for i in range(torch.cuda.device_count()):
+        print(i, torch.cuda.get_device_name(i))
+PY
+```
+
+`nvidia-smi` result:
+
+- GPU 0: 11 MiB, 0% util
+- GPU 1: occupied, 9931 MiB, python process
+- GPU 2: 11 MiB, 0% util
+- GPU 3: 11 MiB, 0% util
+
+Torch CUDA result:
+
+```text
+torch: 2.0.1+cu118
+cuda available: False
+device count: 0
+UserWarning: Can't initialize NVML
+```
+
+Decision:
+
+- Training was not started.
+- This follows the requested rule: if `torch.cuda.is_available()` is `False`, stop.
+- No sudo or permission escalation was used.
+
+### Pending Training Command
+
+Do not run until CUDA is available in the normal user environment.
+
+```bash
+CUDA_VISIBLE_DEVICES=<free_gpu> /data1/lgf/miniconda3/envs/tfclip/bin/python train.py \
+--config_file configs/vit_clipreid_multiproto_k2_farthest_lse.yml \
+OUTPUT_DIR logs/multiproto_k2_farthest_lse_mars_<timestamp>
+```
+
+## MARS Training Result - 2026-06-10
+
+Command:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py \
+--config_file configs/vit_clipreid_multiproto_k2_farthest_lse.yml \
+OUTPUT_DIR logs/multiproto_k2_farthest_lse_mars_20260610_143142
+```
+
+Run metadata:
+
+- Branch: `exp-multiproto-memory`
+- Commit: `9e56484`
+- Selected GPU: `0`
+- Output dir: `logs/multiproto_k2_farthest_lse_mars_20260610_143142`
+- Start: `2026-06-10 14:35:40 +0800`
+- End: `2026-06-10 18:13:23 +0800`
+- Train time: `3:37:35`
+- Exit status: `0`
+
+Artifacts:
+
+- `train_log.txt`: saved
+- `multiproto_memory_stats.txt`: saved
+- `best_model.pth.tar`: saved
+- `checkpoint_ep.pth.tar`: saved
+- `run_meta.txt`: saved
+
+Result:
+
+| Dataset | Method | Config | Output Dir | mAP | Rank-1 | Rank-5 | Best Epoch | Train Time | Notes |
+|---|---|---|---|---:|---:|---:|---:|---|---|
+| MARS | Multi-prototype K=2 farthest logsumexp | `configs/vit_clipreid_multiproto_k2_farthest_lse.yml` | `logs/multiproto_k2_farthest_lse_mars_20260610_143142` | 83.9 | 90.9 | 97.8 | 62 | 3:37:35 | Feature QATA disabled; best selected by mAP+Rank-1. Final epoch 80 was mAP 84.1 / Rank-1 90.4 / Rank-5 97.8. |
+
+Comparison:
+
+| Method | mAP | Rank-1 | Rank-5 |
+|---|---:|---:|---:|
+| Baseline | 88.9 | 93.0 | 98.1 |
+| Residual QATA a=0.1 | 89.2 | 93.0 | 98.1 |
+| Consistency Memory a=0.1 | 88.7 | 92.7 | 97.4 |
+| Multi-prototype K=2 farthest logsumexp | 83.9 | 90.9 | 97.8 |
+
+Multi-prototype memory stats:
+
+| num_classes | K | mean samples/ID | min samples/ID | max samples/ID | fallback IDs | empty-cluster fallbacks | prototype cosine mean | prototype cosine std | cluster mode | agg mode |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| 625 | 2 | 13.2768 | 1 | 271 | 1 | 0 | 0.9322 | 0.0329 | farthest | logsumexp |
+
+Analysis:
+
+- This first multi-prototype implementation did not beat the baseline. It is about `-5.0` mAP and `-2.1` Rank-1 behind the current MARS baseline.
+- It also did not beat Residual QATA a=0.1, which remains the strongest current modification.
+- Rank-5 degradation is small (`97.8` vs baseline `98.1`), but mAP and Rank-1 degradation are large enough that this version should not be continued as-is.
+- The memory construction itself is numerically stable: only one ID used the single-sample fallback, and there were no empty-cluster fallbacks.
+- The prototype cosine mean is very high (`0.9322`), indicating that the two prototypes per ID are usually very close. This suggests the farthest-two split did not create strongly separated modes in the current sequence feature space.
+- The result does not fully disprove the multi-prototype hypothesis because this first version also changes the memory similarity path to prototype-level cosine/logsumexp. A fairer next diagnostic would isolate whether the drop comes from prototype construction, similarity scaling, or the multi-prototype assumption itself.
+
+Recommendation:
+
+- Do not run iLIDS for this variant.
+- Do not immediately run KMeans or max aggregation as blind follow-ups.
+- First add a control experiment or CPU/GPU-light diagnostic that compares:
+  - original single-prototype dot-product scoring,
+  - duplicated single-prototype `[C,2,D]` with the multi-prototype aggregation path,
+  - farthest prototypes with dot-product-compatible scoring.
+- If the duplicated-prototype control also drops, the issue is likely the scoring/aggregation path rather than the prototype hypothesis.
+- If duplicated-prototype is stable but farthest drops, prototype construction is the likely failure point.
+
+## Duplicate Mean Control Implementation - 2026-06-10
+
+Goal:
+
+- Keep the multi-prototype scoring path unchanged.
+- Replace farthest-two prototypes with duplicated original mean prototypes:
+  - original mean memory: `[num_classes, 512]`
+  - duplicate mean memory: `[num_classes, K, 512]`
+  - for K=2, `proto[:,0,:] == proto[:,1,:]`
+- This isolates whether the large MARS drop comes from:
+  - the multi-prototype scoring/logsumexp path, or
+  - the farthest-two prototype construction.
+
+Code/config changes:
+
+- `processor/processor_clipreid_stage2.py`
+  - Added `cluster_mode="duplicate_mean"` in `build_multi_prototype_features`.
+  - `duplicate_mean` first computes the same per-ID mean as the single-prototype baseline, then repeats it K times.
+  - `farthest` behavior remains unchanged.
+  - `MULTI_ENABLED=False` remains the original single mean path.
+- `configs/vit_clipreid_multiproto_k2_dupmean_lse.yml`
+  - `MODEL.QATA.ENABLED=False`
+  - `MODEL.MEMORY.MULTI_ENABLED=True`
+  - `MODEL.MEMORY.NUM_PROTOTYPES=2`
+  - `MODEL.MEMORY.CLUSTER_MODE="duplicate_mean"`
+  - `MODEL.MEMORY.AGG_MODE="logsumexp"`
+  - `MODEL.MEMORY.AGG_TEMP=0.07`
+  - `MODEL.MEMORY.NORMALIZE_PROTOTYPES=True`
+
+Sanity checks:
+
+```bash
+/data1/lgf/miniconda3/envs/tfclip/bin/python -m py_compile \
+processor/processor_clipreid_stage2.py model/make_model_clipreid.py config/defaults.py
+```
+
+Passed.
+
+```bash
+/data1/lgf/miniconda3/envs/tfclip/bin/python /tmp/check_multiproto_memory.py
+```
+
+Passed. Checked:
+
+- duplicate_mean output shape `[C,2,D]`
+- duplicate prototypes are exactly identical
+- with `normalize_prototypes=False`, duplicate prototype equals original single mean
+- logsumexp scoring output shape `[B,C]`
+- no NaN/Inf
+- CPU label-smoothing loss accepts `[B,C]` logits
+
+GPU gate:
+
+`nvidia-smi` under normal user environment shows GPU 0 and GPU 3 as idle enough for training:
+
+- GPU 0: `11MiB`, `0%`
+- GPU 3: `11MiB`, `0%`
+
+But PyTorch CUDA under the same normal user environment is unavailable:
+
+```text
+cuda available: False
+device count: 0
+UserWarning: Can't initialize NVML
+```
+
+Also with `CUDA_VISIBLE_DEVICES=0`:
+
+```text
+cuda available: False
+device count: 0
+get_device_name error: RuntimeError('No CUDA GPUs are available')
+```
+
+Decision:
+
+- Training was not started.
+- This follows the current restriction: no sudo and no permission escalation.
+- Pending command once normal-user CUDA access is available:
+
+```bash
+CUDA_VISIBLE_DEVICES=<free_gpu> /data1/lgf/miniconda3/envs/tfclip/bin/python train.py \
+--config_file configs/vit_clipreid_multiproto_k2_dupmean_lse.yml \
+OUTPUT_DIR logs/multiproto_k2_dupmean_lse_mars_<timestamp>
+```
+
+## Duplicate Mean Multi-prototype Control Result - MARS - 2026-06-10
+
+Run metadata:
+
+- Branch: `exp-multiproto-memory`
+- Commit: `9e56484`
+- Config: `configs/vit_clipreid_multiproto_k2_dupmean_lse.yml`
+- Output: `logs/multiproto_k2_dupmean_lse_mars_20260610_195020`
+- GPU: `3`
+- Start: `2026-06-10 19:58:05 +0800`
+- End: `2026-06-10 23:39:37 +0800`
+- Elapsed: `13292s`
+- Train log running time: `3:41:23.469078`
+- Exit status: `0`
+
+Command:
+
+```bash
+CUDA_VISIBLE_DEVICES=3 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py \
+--config_file configs/vit_clipreid_multiproto_k2_dupmean_lse.yml \
+OUTPUT_DIR logs/multiproto_k2_dupmean_lse_mars_20260610_195020
+```
+
+Artifacts:
+
+- `train_log.txt`
+- `multiproto_memory_stats.txt`
+- `best_model.pth.tar`
+- `checkpoint_ep.pth.tar`
+- `run_meta.txt`
+
+Memory construction stats:
+
+| num_classes | K | mean samples/ID | min samples/ID | max samples/ID | fallback IDs | empty cluster fallbacks | proto cosine mean | proto cosine std | cluster mode | agg mode |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| 625 | 2 | 13.2768 | 1 | 271 | 0 | 0 | 1.0000 | 0.0000 | duplicate_mean | logsumexp |
+
+Result table:
+
+| Dataset | Method | Config | Output Dir | mAP | Rank-1 | Rank-5 | Best Epoch | Train Time | Notes |
+|---|---|---|---|---:|---:|---:|---:|---|---|
+| MARS | Multi-prototype duplicate mean LSE | `configs/vit_clipreid_multiproto_k2_dupmean_lse.yml` | `logs/multiproto_k2_dupmean_lse_mars_20260610_195020` | 84.6 | 90.7 | 97.3 | 66 | 3:41:23 | Code-selected best by mAP+Rank-1. Highest mAP observed was 84.7 at epochs 70/72/76/78/80, with Rank-1 90.4-90.6. |
+
+Comparison:
+
+| Method | mAP | Rank-1 | Rank-5 |
+|---|---:|---:|---:|
+| Baseline | 88.9 | 93.0 | 98.1 |
+| Multi-prototype farthest LSE | 83.9 | 90.9 | 97.8 |
+| Multi-prototype duplicate mean LSE | 84.6 | 90.7 | 97.3 |
+
+Judgment:
+
+1. Duplicate mean is not close to baseline. It is lower by `-4.3 mAP`, `-2.3 Rank-1`, and `-0.8 Rank-5` using the code-selected best epoch.
+2. Because duplicate mean uses the original per-ID mean copied to both prototypes, this control should be nearly equivalent to the single-prototype memory if the multi-prototype scoring path were baseline-equivalent.
+3. The large drop therefore points to the multi-prototype scoring / normalization / logsumexp / shape handling path, not only to the farthest-two prototype construction.
+4. The farthest LSE result is slightly worse than duplicate mean in mAP, but the duplicate-mean failure means KMeans, max aggregation, or iLIDS should not be run yet.
+5. Next diagnostic should be a strict numerical equivalence check: single-prototype baseline score vs duplicated-mean multi-prototype score before training, including every branch that consumes `cluster_features` / `text_features2`.
+6. A safer next implementation would add an identity aggregation mode for duplicate prototypes that exactly returns the original single-prototype score, then verify logits and loss equality before any full training.
+
+## Multi-prototype Scoring Equivalence Check and Fix - 2026-06-11
+
+No training was run. No GPU task was run.
+
+### Code Path Audit
+
+Stage2 call path:
+
+- `train.py`
+  - Calls `do_train_stage2(...)`.
+- `processor/processor_clipreid_stage2.py`
+  - `do_train_stage2()` first extracts sequence-level image features with `model(img, get_image=True)`.
+  - `generate_cluster_features()` builds fixed `cluster_features` once before the epoch loop.
+  - During training, the fixed memory is passed into `model(..., text_features2=cluster_features)`.
+- `model/make_model_clipreid.py`
+  - `get_image=True` returns `img_feature_proj.mean(1)` with shape `[N,512]`.
+  - Training branch consumes `text_features2` and returns `logits` as I2T scores.
+- `loss/make_loss.py`
+  - `loss_func(..., i2tscore=logits1)` applies label-smoothed CE or CE to `[B,num_classes]`.
+
+Original single-prototype formula:
+
+- Input memory: `text_features2: [C,D]`.
+- It is expanded to `[B,C,D]`.
+- SSP is applied on `[B,C,D]`:
+  `text_features2 = text_features2 + SSP(text_features2, video_feature_project)`.
+- I2T score is raw dot product:
+  `score_single = einsum("bd,bkd->bk", img_feature_proj, text_features2)`.
+- No `F.normalize`.
+- No `logit_scale`.
+- No `exp(logit_scale)`.
+
+Previous multi-prototype formula before this fix:
+
+- Input memory: `text_features2: [C,K,D]`.
+- It was flattened to `[C*K,D]`, expanded to `[B,C*K,D]`, passed through SSP, then reshaped to `[B,C,K,D]`.
+- I2T score used cosine-like normalized features:
+  `normalize(image)`, `normalize(text)`, then dot product.
+- `logsumexp` used:
+  `temp * logsumexp(sim / temp, dim=K)` without subtracting `temp*log(K)`.
+
+Concrete differences found:
+
+1. **Scoring scale mismatch**: original single path uses raw dot product, while multi path used normalized cosine similarity.
+2. **Logsumexp constant shift**: duplicate prototypes produce `score + temp*log(K)` unless corrected.
+3. **SSP token-count mismatch**: original SSP sees `C` memory tokens; previous multi path flattened prototypes and made SSP see `C*K` tokens. Because SSP includes self-attention over memory tokens, duplicated prototypes are not equivalent after SSP.
+4. **duplicate_mean construction mismatch**: with `NORMALIZE_PROTOTYPES=True`, duplicate mean prototypes were normalized, so they were not strict copies of original mean memory.
+
+These are code-level reasons why the duplicate-mean control dropped from baseline. The result cannot be attributed only to farthest-two prototype construction.
+
+### Fixes Made
+
+`model/make_model_clipreid.py`:
+
+- `compute_i2t_scores()` now preserves the original raw-dot formula for both single and multi memory.
+- Multi-prototype scores are computed as `[B,C,K]` raw dot products.
+- `max` returns `max_k`.
+- `logsumexp` now uses corrected aggregation:
+  `temp * logsumexp(sim / temp, dim=K) - temp * log(K)`.
+- Multi-prototype SSP is now class-level:
+  - expand memory to `[B,C,K,D]`
+  - compute `class_memory = mean_K(memory)` with shape `[B,C,D]`
+  - run `SSP(class_memory, video_feature_project)` once with `C` tokens
+  - add the same class prompt to each prototype
+- This preserves duplicate-mean equivalence while avoiding SSP token-count expansion.
+
+`processor/processor_clipreid_stage2.py`:
+
+- `duplicate_mean` now strictly copies the original per-ID mean memory.
+- `NORMALIZE_PROTOTYPES=True` is ignored for `duplicate_mean`, because this mode is a control path that must preserve original mean features exactly.
+- The original `MULTI_ENABLED=False` path still returns the original single mean memory.
+
+### Equivalence Script
+
+Temporary script:
+
+```bash
+/data1/lgf/miniconda3/envs/tfclip/bin/python /tmp/check_multiproto_equivalence.py
+```
+
+Checks:
+
+- random `image_features: [B,D]`
+- random `cluster_features_single: [C,D]`
+- duplicate memory `[C,2,D]`
+- raw single score
+- duplicate max score
+- corrected duplicate logsumexp score
+- SSP-adapted single vs SSP-adapted duplicate
+- `duplicate_mean` builder vs `build_single_prototype_features`
+- CE loss invariance
+
+Results:
+
+| Check | Max Abs Diff |
+|---|---:|
+| duplicate max vs single | 0.0000000000 |
+| corrected duplicate logsumexp vs single | 0.0000038147 |
+| single score vs raw dot | 0.0000000000 |
+| raw dot vs old cosine reference | 49.5935287476 |
+| SSP duplicate max vs SSP single | 0.0000076294 |
+| SSP corrected duplicate logsumexp vs SSP single | 0.0000076294 |
+| duplicate proto0 vs single mean | 0.0000000000 |
+| duplicate proto1 vs single mean | 0.0000000000 |
+| duplicate proto0 vs proto1 | 0.0000000000 |
+| CE duplicate max vs CE single | 0.0000000000 |
+| CE duplicate logsumexp vs CE single | 0.0000000000 |
+
+`py_compile` also passed:
+
+```bash
+/data1/lgf/miniconda3/envs/tfclip/bin/python -m py_compile \
+model/make_model_clipreid.py processor/processor_clipreid_stage2.py config/defaults.py
+```
+
+### Current Recommendation
+
+The numerical equivalence check now passes, so it is valid to rerun the duplicate-mean control. Do not run farthest, KMeans, max, iLIDS, or Residual QATA combinations until the corrected duplicate-mean run returns close to baseline.
+
+Recommended command, not yet executed:
+
+```bash
+CUDA_VISIBLE_DEVICES=<free_gpu> /data1/lgf/miniconda3/envs/tfclip/bin/python train.py \
+--config_file configs/vit_clipreid_multiproto_k2_dupmean_lse.yml \
+OUTPUT_DIR logs/multiproto_k2_dupmean_lse_fixed_mars_<timestamp>
+```
+
+Expected behavior:
+
+- If duplicate mean fixed returns near baseline, the scoring path is repaired and farthest/KMeans can be revisited.
+- If duplicate mean fixed still drops, there is another untested branch-level mismatch and further training should stop.
+
+## Fixed Duplicate Mean Multi-prototype Control Result - MARS - 2026-06-11
+
+Run metadata:
+
+- Branch: `exp-multiproto-memory`
+- Commit: `9e56484`
+- Config: `configs/vit_clipreid_multiproto_k2_dupmean_lse.yml`
+- Output: `logs/multiproto_k2_dupmean_lse_fixed_mars_20260611_015110`
+- GPU: `2`
+- Start: `2026-06-11 01:50:41 +0800`
+- End: `2026-06-11 05:11:58 +0800`
+- Elapsed: `12077s`
+- Train log running time: `3:21:08.936234`
+- Exit status: `0`
+
+Command:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py \
+--config_file configs/vit_clipreid_multiproto_k2_dupmean_lse.yml \
+OUTPUT_DIR logs/multiproto_k2_dupmean_lse_fixed_mars_20260611_015110
+```
+
+Memory construction stats:
+
+| num_classes | K | mean samples/ID | min samples/ID | max samples/ID | fallback IDs | empty cluster fallbacks | proto cosine mean | proto cosine std | cluster mode | agg mode |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| 625 | 2 | 13.2768 | 1 | 271 | 0 | 0 | 1.0000 | 0.0000 | duplicate_mean | logsumexp |
+
+Result table:
+
+| Dataset | Method | Config | Output Dir | mAP | Rank-1 | Rank-5 | Best Epoch | Train Time | Notes |
+|---|---|---|---|---:|---:|---:|---:|---|---|
+| MARS | Fixed multi-prototype duplicate mean LSE | `configs/vit_clipreid_multiproto_k2_dupmean_lse.yml` | `logs/multiproto_k2_dupmean_lse_fixed_mars_20260611_015110` | 88.9 | 93.0 | 97.3 | 64 | 3:21:09 | Corrected raw-dot scoring, corrected logsumexp, class-level SSP, strict duplicate mean. Code-selected best by mAP+Rank-1. |
+
+Comparison:
+
+| Method | mAP | Rank-1 | Rank-5 | Best Epoch |
+|---|---:|---:|---:|---:|
+| Baseline | 88.9 | 93.0 | 98.1 | 56 |
+| Multi-prototype farthest LSE, old scoring | 83.9 | 90.9 | 97.8 | 62 |
+| Multi-prototype duplicate mean LSE, old scoring | 84.6 | 90.7 | 97.3 | 66 |
+| Fixed duplicate mean LSE | 88.9 | 93.0 | 97.3 | 64 |
+
+Conclusion:
+
+The fixed duplicate-mean control recovers baseline-level mAP and Rank-1. This confirms that the previous duplicate-mean failure was caused by the non-equivalent multi-prototype scoring path, not by the duplicate-memory construction itself. The remaining Rank-5 gap versus the historical baseline is likely run variance or a secondary detail, but the large `-4.3 mAP` failure is removed.
+
+Next decision:
+
+- The multi-prototype scoring path is now sufficiently repaired to revisit prototype construction.
+- Do not use the old farthest result as evidence against multi-prototype memory.
+- The next valid experiment should be a corrected farthest-two run with the fixed scoring path.
+- KMeans, max aggregation, iLIDS, and Residual-QATA combinations should still wait until corrected farthest is tested on MARS.

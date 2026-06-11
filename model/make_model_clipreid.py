@@ -12,6 +12,34 @@ from .Visual_Prompt import visual_prompt
 from .quality_aggregation import QualityWeightedPooling
 
 
+def compute_i2t_scores(image_features, text_features, agg_mode="logsumexp", temp=0.07):
+    if text_features.dim() == 2:
+        return torch.einsum("bd,kd->bk", image_features, text_features)
+
+    if text_features.dim() == 3:
+        if text_features.size(0) == image_features.size(0):
+            return torch.einsum("bd,bkd->bk", image_features, text_features)
+
+        sim = torch.einsum("bd,kpd->bkp", image_features, text_features)
+        return _aggregate_prototype_scores(sim, agg_mode, temp)
+
+    if text_features.dim() == 4:
+        sim = torch.einsum("bd,bkpd->bkp", image_features, text_features)
+        return _aggregate_prototype_scores(sim, agg_mode, temp)
+
+    raise ValueError("Unsupported text feature shape: {}".format(tuple(text_features.shape)))
+
+
+def _aggregate_prototype_scores(sim, agg_mode="logsumexp", temp=0.07):
+    if agg_mode == "max":
+        return sim.max(dim=2).values
+    if agg_mode == "logsumexp":
+        if temp <= 0:
+            raise ValueError("MODEL.MEMORY.AGG_TEMP must be > 0 for logsumexp aggregation.")
+        return temp * torch.logsumexp(sim / temp, dim=2) - temp * np.log(sim.size(2))
+    raise ValueError("Unsupported MODEL.MEMORY.AGG_MODE: {}".format(agg_mode))
+
+
 def weights_init_kaiming(m):
     classname = m.__class__.__name__
     if classname.find('Linear') != -1:
@@ -197,6 +225,8 @@ class build_transformer(nn.Module):
         self.qata_return_weights = cfg.MODEL.QATA.RETURN_WEIGHTS
         self.qata_log_stats = cfg.MODEL.QATA.LOG_STATS
         self.latest_qata_weights = None
+        self.memory_agg_mode = cfg.MODEL.MEMORY.AGG_MODE
+        self.memory_agg_temp = cfg.MODEL.MEMORY.AGG_TEMP
         if self.qata_enabled:
             self.qpool_768 = QualityWeightedPooling(
                 self.in_planes,
@@ -319,12 +349,27 @@ class build_transformer(nn.Module):
         feat_proj_temp = self.bottleneck_proj_temp2(cls_f_tp)
 
         if self.training:
-            text_features2 = text_features2.unsqueeze(0).expand(B, -1, -1)  # torch.Size([b, 150, 512])
             image_features_proj_raw2 = image_features_proj_raw.view(B, T, -1, image_features_proj_raw.shape[-1])
             video_feature_project = image_features_proj_raw2.mean(1)
-            text_features2 = text_features2 + self.SSP(text_features2,
-                                                                     video_feature_project)  # torch.Size([8, 625, 512])
-            logits = torch.einsum("bd,bkd->bk", img_feature_proj, text_features2)  # torch.Size([4, 101])
+            if text_features2.dim() == 2:
+                text_features2 = text_features2.unsqueeze(0).expand(B, -1, -1)  # torch.Size([b, 150, 512])
+                text_features2 = text_features2 + self.SSP(text_features2,
+                                                                         video_feature_project)  # torch.Size([8, 625, 512])
+                logits = compute_i2t_scores(img_feature_proj, text_features2)
+            elif text_features2.dim() == 3:
+                num_memory_classes, num_prototypes, feat_dim = text_features2.shape
+                text_features2 = text_features2.unsqueeze(0).expand(B, -1, -1, -1)
+                class_memory = text_features2.mean(dim=2)
+                class_prompt = self.SSP(class_memory, video_feature_project)
+                text_features2 = text_features2 + class_prompt.unsqueeze(2)
+                logits = compute_i2t_scores(
+                    img_feature_proj,
+                    text_features2,
+                    agg_mode=self.memory_agg_mode,
+                    temp=self.memory_agg_temp,
+                )
+            else:
+                raise ValueError("Unsupported text_features2 shape: {}".format(tuple(text_features2.shape)))
 
             cls_score = self.classifier2(feat)
             cls_score_proj = self.classifier_proj(feat_proj)

@@ -61,6 +61,16 @@ _C.MODEL.QATA.RETURN_WEIGHTS = False
 _C.MODEL.QATA.LOG_STATS = False
 _C.MODEL.QATA.STATS_FILE = "qata_weight_stats.txt"
 
+# CLIP-Memory
+_C.MODEL.MEMORY = CN()
+_C.MODEL.MEMORY.MULTI_ENABLED = False
+_C.MODEL.MEMORY.NUM_PROTOTYPES = 2
+_C.MODEL.MEMORY.CLUSTER_MODE = "farthest"
+_C.MODEL.MEMORY.AGG_MODE = "logsumexp"
+_C.MODEL.MEMORY.AGG_TEMP = 0.07
+_C.MODEL.MEMORY.NORMALIZE_PROTOTYPES = True
+_C.MODEL.MEMORY.MIN_SAMPLES_PER_PROTO = 1
+
 # -----------------------------------------------------------------------------
 # INPUT
 # -----------------------------------------------------------------------------
