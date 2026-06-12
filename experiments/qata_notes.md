@@ -1879,3 +1879,49 @@ Comparison:
 Conclusion:
 
 The fixed duplicate-mean control recovers baseline-level mAP and Rank-1, so the severe old duplicate/farthest drop was caused by the non-equivalent scoring path. The scoring path is now repaired enough to retest farthest-two. Do not proceed to KMeans, max, iLIDS, or Residual QATA combinations until corrected farthest MARS is tested.
+
+## Fixed Farthest-Two Multi-prototype LSE Result - 2026-06-11
+
+Experiment:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py \
+--config_file configs/vit_clipreid_multiproto_k2_farthest_lse.yml \
+OUTPUT_DIR logs/multiproto_k2_farthest_lse_fixed_mars_20260611_173726
+```
+
+Result:
+
+| Dataset | Method | Config | Output Dir | mAP | Rank-1 | Rank-5 | Best Epoch | Train Time | Notes |
+|---|---|---|---|---:|---:|---:|---:|---|---|
+| MARS | Fixed farthest-two LSE | `configs/vit_clipreid_multiproto_k2_farthest_lse.yml` | `logs/multiproto_k2_farthest_lse_fixed_mars_20260611_173726` | 88.3 | 93.0 | 97.4 | 48 | 3:21:24 | QATA disabled. Corrected scoring path. mAP-best first appears at epoch 48; code-selected best by mAP+Rank-1 is epoch 42 with 88.2/93.1/97.4. |
+
+Memory stats:
+
+- num_classes: `625`
+- K: `2`
+- mean samples per ID: `13.2768`
+- min/max samples per ID: `1 / 271`
+- fallback IDs: `1`
+- empty-cluster fallbacks: `0`
+- prototype cosine mean/std: `0.9322 / 0.0329`
+- cluster mode: `farthest`
+- aggregation mode: `logsumexp`
+
+Comparison:
+
+| Method | mAP | Rank-1 | Rank-5 |
+|---|---:|---:|---:|
+| Baseline | 88.9 | 93.0 | 98.1 |
+| Residual QATA a=0.1 | 89.2 | 93.0 | 98.1 |
+| Old farthest LSE | 83.9 | 90.9 | 97.8 |
+| Fixed duplicate mean LSE | 88.9 | 93.0 | 97.3 |
+| Fixed farthest-two LSE | 88.3 | 93.0 | 97.4 |
+
+Conclusion:
+
+Fixed farthest-two LSE is much better than the old broken-scoring farthest run, but it still does not recover baseline mAP or Rank-5. The prototype cosine `0.9322 / 0.0329` indicates two prototypes are different but still highly similar. Because duplicate mean recovers baseline-level mAP while farthest-two drops, the current evidence points to farthest-two prototype construction/assignment being weak rather than the repaired scoring path being the main problem.
+
+Recommendation:
+
+Pause blind multi-prototype expansion. Do not run KMeans, max, iLIDS, or Residual-QATA combinations yet. If the memory direction continues, prefer a more semantically grounded split such as camera-aware or tracklet-condition-aware prototypes, preceded by prototype-quality diagnostics.

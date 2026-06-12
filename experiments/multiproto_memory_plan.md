@@ -1289,3 +1289,61 @@ Next decision:
 - Do not use the old farthest result as evidence against multi-prototype memory.
 - The next valid experiment should be a corrected farthest-two run with the fixed scoring path.
 - KMeans, max aggregation, iLIDS, and Residual-QATA combinations should still wait until corrected farthest is tested on MARS.
+
+## Fixed Farthest-Two Multi-prototype LSE Result - MARS - 2026-06-11
+
+Run metadata:
+
+- Branch: `exp-multiproto-memory`
+- Commit: `0015cd6`
+- Config: `configs/vit_clipreid_multiproto_k2_farthest_lse.yml`
+- Output: `logs/multiproto_k2_farthest_lse_fixed_mars_20260611_173726`
+- GPU: `2`
+- Start: `2026-06-11 17:37:26 +0800`
+- End: `2026-06-11 20:58:58 +0800`
+- Elapsed: `12092s`
+- Train log running time: `3:21:24.019850`
+- Exit status: `0`
+
+Command:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 /data1/lgf/miniconda3/envs/tfclip/bin/python train.py \
+--config_file configs/vit_clipreid_multiproto_k2_farthest_lse.yml \
+OUTPUT_DIR logs/multiproto_k2_farthest_lse_fixed_mars_20260611_173726
+```
+
+Memory construction stats:
+
+| num_classes | K | mean samples/ID | min samples/ID | max samples/ID | fallback IDs | empty cluster fallbacks | proto cosine mean | proto cosine std | cluster mode | agg mode |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+| 625 | 2 | 13.2768 | 1 | 271 | 1 | 0 | 0.9322 | 0.0329 | farthest | logsumexp |
+
+Result table:
+
+| Dataset | Method | Config | Output Dir | mAP | Rank-1 | Rank-5 | Best Epoch | Train Time | Notes |
+|---|---|---|---|---:|---:|---:|---:|---|---|
+| MARS | Fixed multi-prototype farthest-two LSE | `configs/vit_clipreid_multiproto_k2_farthest_lse.yml` | `logs/multiproto_k2_farthest_lse_fixed_mars_20260611_173726` | 88.3 | 93.0 | 97.4 | 48 | 3:21:24 | QATA disabled. Corrected raw-dot scoring and corrected logsumexp path. Code-selected best by mAP+Rank-1 is epoch 42 with 88.2/93.1/97.4; mAP-best first appears at epoch 48. |
+
+Comparison:
+
+| Method | mAP | Rank-1 | Rank-5 | Best Epoch | Notes |
+|---|---:|---:|---:|---:|---|
+| Baseline | 88.9 | 93.0 | 98.1 | 56 | original TF-CLIP |
+| Residual QATA a=0.1 | 89.2 | 93.0 | 98.1 | 42/repeat stable | feature-only |
+| Fixed duplicate mean LSE | 88.9 | 93.0 | 97.3 | 64 | scoring path control |
+| Fixed farthest-two LSE | 88.3 | 93.0 | 97.4 | 48 | corrected scoring path, farthest prototypes |
+
+Conclusion:
+
+- Corrected farthest-two LSE does not exceed baseline: `-0.6 mAP`, Rank-1 tied, Rank-5 `-0.7`.
+- It does not exceed Residual QATA a=0.1: `-0.9 mAP`, Rank-1 tied, Rank-5 `-0.7`.
+- It is no longer catastrophically bad like the old 83.9 mAP run, confirming the scoring fix mattered.
+- Prototype cosine mean/std `0.9322 / 0.0329` shows the two prototypes are not duplicates, but they are still highly similar. The split creates some diversity, not a clearly separated multi-modal memory.
+- Since duplicate mean recovers baseline-level mAP while farthest-two drops, the likely issue is the farthest-two construction/assignment quality rather than the repaired scoring path. This does not fully falsify multi-prototype memory, but it weakens the simple farthest-two variant.
+
+Next recommendation:
+
+- Do not continue blind KMeans/max/iLIDS runs immediately.
+- If continuing multi-prototype, the next defensible variant should be more semantically grounded, e.g. camera-aware or tracklet-condition-aware split, not another unsupervised farthest split.
+- Keep Residual QATA a=0.1 as the only current positive result; pause multi-prototype training until prototype quality diagnostics are added.
