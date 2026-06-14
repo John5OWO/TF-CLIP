@@ -16,3 +16,31 @@ __pycache__/
 
 # vscode
 .vscode/
+
+# Experiment heavy files
+experiments/**/logs/
+experiments/**/output/
+experiments/**/outputs/
+experiments/**/checkpoints/
+experiments/**/weights/
+experiments/**/official_package/
+experiments/**/tmp/
+experiments/**/cache/
+
+# Large experiment artifacts
+experiments/**/*.pth
+experiments/**/*.pt
+experiments/**/*.ckpt
+experiments/**/*.pkl
+experiments/**/*.npy
+experiments/**/*.npz
+experiments/**/*.zip
+experiments/**/*.tar
+experiments/**/*.tar.gz
+experiments/**/*.log
+experiments/**/*.out
+experiments/**/*.err
+
+# Dataset / extracted packages
+data/
+datasets/
